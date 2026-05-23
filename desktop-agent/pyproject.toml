@@ -1,0 +1,48 @@
+# desktop-agent — host-side desktop-automation service.
+#
+# Managed via `uv` (same pattern as xtts-server).  Bootstrap on a fresh
+# host:
+#     curl -LsSf https://astral.sh/uv/install.sh | sh   # or `brew install uv`
+#     cd desktop-agent && ./start.sh
+#
+# Cross-platform — uv installs the appropriate engines per OS:
+#   macOS   →  AppleScript (system /usr/bin/osascript) + pyautogui +
+#              JXA-based NSWorkspace default-app probe
+#   Linux   →  pyautogui + xdotool (system) + python-xlib (PyPI);
+#              xdg-mime default-app probe (TODO)
+#   Windows →  pyautogui + pywinauto;
+#              winreg UserChoice default-app probe (TODO)
+#
+# Why a separate host process instead of running automation from the
+# Docker orchestrator: containers can't reach the host's accessibility
+# tree, can't drive osascript, can't see the screen, and can't move
+# the mouse.  HTTP on 127.0.0.1 keeps the boundary clean (and trivially
+# revocable — kill the daemon and all automation stops).
+#
+# No per-app readers live here any more — Wave 3 dropped the
+# Mail.app Envelope Index path in favour of a universal computer_use
+# layer in the orchestrator (AppleScript fast-path / vision fallback).
+
+[project]
+name = "desktop-agent"
+version = "1.1.0"
+description = "Host-side desktop-automation gateway for the voice-assistant orchestrator (screenshot + AppleScript + pyautogui)"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    # pyautogui itself is cross-platform; it pulls platform-specific
+    # backends transitively (pyobjc on macOS, python-xlib on Linux,
+    # pywin32 on Windows) but doesn't list them as deps in many builds
+    # — we list the ones that matter explicitly below.
+    "pyautogui>=0.9.54",
+    "Pillow>=10",
+    "httpx>=0.27",
+    # Platform-specific automation backends.  uv resolves these to the
+    # right wheels per host; on non-matching platforms they're skipped.
+    "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
+    "python-xlib>=0.33; sys_platform == 'linux'",
+    "pywinauto>=0.6; sys_platform == 'win32'",
+    "pywin32>=306; sys_platform == 'win32'",
+]

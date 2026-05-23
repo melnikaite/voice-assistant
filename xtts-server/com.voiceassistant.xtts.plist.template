@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd plist for auto-starting xtts-server at login on macOS.
+
+  This is a TEMPLATE — install-autostart.sh substitutes the path
+  placeholders for your actual project location and copies the result
+  into ~/Library/LaunchAgents/.
+
+  After install: launchctl load it.  After that, xtts-server starts at
+  every login and auto-restarts if it crashes (but NOT if it exits
+  cleanly — see KeepAlive.SuccessfulExit below).  Uninstall: see
+  uninstall-autostart.sh.
+
+  This is opt-in.  If you'd rather start it manually (or via tmux)
+  just ignore this file.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.voiceassistant.xtts</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__SCRIPT_PATH__</string>
+    </array>
+
+    <!-- Working directory = xtts-server/.  `uv sync` reads pyproject.toml
+         and uv.lock relative to CWD, so we MUST chdir there before the
+         process starts.  start.sh also does its own `cd "$(dirname …)"`
+         as a belt-and-braces measure, but launchd's WorkingDirectory is
+         the canonical path for everything else (model cache, .venv). -->
+    <key>WorkingDirectory</key>
+    <string>__SCRIPT_DIR__</string>
+
+    <!-- Run when the user logs in. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart only if the process exits with a non-zero status
+         (i.e. crashed).  If you `launchctl unload` or kill -TERM and
+         the server exits cleanly, launchd respects that and does NOT
+         immediately re-spawn.  The bare `<true/>` form was annoying
+         in that respect — there was no way to stop the service
+         without first unloading the plist. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Throttle restarts to prevent fast-loop if something is broken. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Make sure uv (typically in /opt/homebrew/bin on Apple Silicon
+         or ~/.local/bin from the curl installer) is on PATH when
+         launchd runs the script. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- Logs land in ~/Library/Logs/voice-assistant/ — the canonical
+         Mac location for per-user app logs.  install-autostart.sh
+         creates this directory at install time if needed. -->
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/voice-assistant/xtts.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/voice-assistant/xtts.err.log</string>
+</dict>
+</plist>

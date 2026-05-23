@@ -1,0 +1,44 @@
+# xtts-server — host-side TTS service.
+#
+# Managed via `uv` (https://github.com/astral-sh/uv) — a single-binary
+# Python project manager that brings its own Python toolchain.  This
+# means a Homebrew Python upgrade can never break this service: uv
+# installs Python 3.12 into its own data dir (~/.local/share/uv) and
+# the venv we create here references THAT, not the system Python.
+#
+# Bootstrap (one-time on the host):
+#     curl -LsSf https://astral.sh/uv/install.sh | sh     (or `brew install uv`)
+#
+# Then everything goes through start.sh.  Uninstall = `./uninstall.sh`.
+
+[project]
+name = "xtts-server"
+version = "1.0.0"
+description = "Host-side XTTS-v2 streaming TTS service for the voice-assistant orchestrator"
+# Pin to a Python range that has prebuilt wheels for every dependency.
+# 3.13 is excluded because coqui-tts' torch+numba stack lags behind.
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "coqui-tts[codec]>=0.27",
+    # ── coqui-tts 0.27.5 packaging bugs we work around ────────────
+    # • Doesn't declare `torch` as a runtime dep (despite needing it
+    #   for every model load).  Listed explicitly so uv installs it.
+    #   On macOS arm64 the PyPI wheel ships with MPS support enabled.
+    # • Doesn't pin an upper bound on transformers, so the resolver
+    #   pulls in 5.x — which removed `isin_mps_friendly`, a symbol
+    #   coqui-tts still imports.  Pin to the 4.x family.
+    "torch>=2.4",
+    "torchaudio>=2.4",
+    "transformers>=4.57,<5",
+    # ── Our HTTP layer ────────────────────────────────────────────
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "httpx>=0.27",
+    "pydantic>=2",
+    "numpy<2",
+]
+
+[tool.uv]
+# We're a script project, not a publishable package — tell uv it
+# doesn't need to build a wheel for the project itself.
+package = false

@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voice Assistant</title>
+    <!--
+      Third-party libraries are vendored into ./vendor so the assistant
+      works fully offline.  If these 404, run ./vendor/fetch.sh once to
+      populate them — see vendor/fetch.sh for the upstream URLs + pins.
+    -->
+    <link rel="stylesheet" href="./vendor/pico.min.css" />
+    <link rel="stylesheet" href="./style.css" />
+    <!-- Chart.js powers the Stats section.  Loaded once at boot; if
+         vendoring has not been run the dashboard section degrades to
+         a "couldn't load charts" line, but the rest of the page keeps
+         working. -->
+    <script src="./vendor/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <main class="container">
+      <hgroup>
+        <h1 data-i18n="app.title">Voice Assistant</h1>
+        <p data-i18n="app.tagline">Say «hey jarvis», then a command.  WebRTC + server-side TTS — you can interrupt by speaking.</p>
+      </hgroup>
+
+      <!--
+        Auth banner: shows either the "Sign in" form (no live cookie
+        session) or a logged-in chip with logout button.  Driven by
+        loadAuthState() on page load + after every successful login.
+        Tier-2 UI sections (Pending, Memory, Settings) live below this
+        banner and are hidden until a session exists.
+      -->
+      <article id="auth-banner" data-state="loading">
+        <div id="auth-anonymous" class="auth-block" style="display:none">
+          <header data-i18n="auth.anonymous_header">Sign in</header>
+          <p>
+            <small style="color:var(--pico-muted-color)" data-i18n="auth.anonymous_hint">
+              Log in with your profile to edit memory, settings, and confirm deferred actions.
+            </small>
+          </p>
+          <div class="grid" style="grid-template-columns: 1fr 1fr auto">
+            <select id="auth-profile">
+              <option value="" data-i18n="auth.pick_profile">— pick a profile —</option>
+            </select>
+            <input id="auth-passphrase" type="password" data-i18n-placeholder="auth.password" placeholder="Password" autocomplete="current-password" />
+            <button id="auth-login-btn" type="button" data-i18n="auth.login">Log in</button>
+          </div>
+          <small id="auth-status" style="color:var(--pico-muted-color)"></small>
+        </div>
+
+        <div id="auth-known" class="auth-block" style="display:none">
+          <header data-i18n="auth.profile">Profile</header>
+          <div class="grid" style="grid-template-columns: 1fr auto auto">
+            <p style="margin:0">
+              <span data-i18n="auth.signed_in_as">Signed in as</span> <strong id="auth-current-name">—</strong>
+              <small style="color:var(--pico-muted-color)">
+                · <span data-i18n="auth.valid_until">valid until</span> <span id="auth-current-expires">—</span>
+              </small>
+            </p>
+            <button id="auth-set-passphrase-btn" class="outline secondary" type="button" data-i18n="auth.change_pw">Change password</button>
+            <button id="auth-logout-btn" class="outline" type="button" data-i18n="auth.logout">Log out</button>
+          </div>
+        </div>
+
+        <div id="auth-needs-setup" class="auth-block" style="display:none">
+          <header data-i18n="auth.first_run">First run</header>
+          <p>
+            <small style="color:var(--pico-muted-color)" data-i18n="auth.first_run_hint">
+              Create a password for your profile — needed to confirm deferred actions and edit memory.
+            </small>
+          </p>
+          <div class="grid" style="grid-template-columns: 1fr 1fr auto">
+            <select id="setup-profile">
+              <option value="" data-i18n="auth.pick_profile">— pick a profile —</option>
+            </select>
+            <input id="setup-passphrase" type="password" data-i18n-placeholder="auth.new_password" placeholder="New password" />
+            <button id="setup-btn" type="button" data-i18n="auth.create">Create</button>
+          </div>
+          <small id="setup-status" style="color:var(--pico-muted-color)"></small>
+        </div>
+      </article>
+
+      <!--
+        Hidden audio sink for the assistant's voice.  The remote audio
+        track from the WebRTC peer is attached to this element via
+        srcObject; the browser plays it through its voice engine, which
+        is what lets the built-in AEC see the playback as a reference
+        signal and cancel speaker→mic feedback automatically.
+        Routing through AudioContext.destination would bypass AEC.
+      -->
+      <audio id="remote-tts" autoplay playsinline></audio>
+
+      <div class="grid">
+        <button id="start" data-i18n="controls.start">Start</button>
+        <button id="stop" class="secondary" disabled data-i18n="controls.stop">Stop</button>
+        <button id="cancel" class="outline" disabled data-i18n="controls.cancel">Cancel</button>
+      </div>
+
+      <article>
+        <header>Push-to-talk</header>
+        <p>
+          <span data-i18n="ptt.hint_pre">Hold the button (or</span> <kbd>Space</kbd><span data-i18n="ptt.hint_post">), speak, release — command skips the wake word.</span>
+        </p>
+        <div class="grid" style="grid-template-columns: 1fr auto; align-items: center">
+          <button id="ptt" class="contrast" disabled data-i18n="controls.ptt">🎤 Talk</button>
+          <!--
+            Image attach: paperclip + hidden file input.  Picking or
+            dropping an image stages it for the NEXT voice utterance,
+            which is then routed to Claude vision (multimodal Q&A)
+            instead of the local Gemma agent.  One image per turn —
+            picking a second replaces the first.  See main.js
+            handleAttachFile / attach_image WS message.
+          -->
+          <div>
+            <input id="attach-input" type="file" accept="image/*" style="display:none" />
+            <button id="attach-btn" class="outline" type="button" data-i18n-title="attach.btn_title" title="Attach image" style="margin:0; padding:0.4rem 0.8rem">
+              📎
+            </button>
+          </div>
+        </div>
+        <div id="attach-preview" style="display:none; margin-top: 0.5rem; padding: 0.5rem; border:1px dashed var(--pico-muted-border-color); border-radius: 0.4rem">
+          <div class="grid" style="grid-template-columns: 64px 1fr auto; gap: 0.5rem; align-items: center">
+            <img id="attach-thumb" alt="" style="max-width:64px; max-height:64px; border-radius:0.25rem" />
+            <small id="attach-meta" style="color: var(--pico-muted-color)"></small>
+            <button id="attach-clear" class="outline secondary" type="button" style="margin:0; padding:0.2rem 0.6rem; font-size:0.8rem">✕</button>
+          </div>
+          <small style="color: var(--pico-muted-color)" data-i18n="attach.hint">
+            Image will attach to the next voice turn — Claude will look at it and answer your question.
+          </small>
+        </div>
+      </article>
+
+      <article id="state-card" data-state="—">
+        <div class="state-row">
+          <div class="state-circle"></div>
+          <div class="state-text">
+            <div class="state-label" id="state-label" data-i18n="state.idle">inactive</div>
+            <div class="state-sub" id="state-sub" data-i18n="state.idle_hint">Press «Start» to enable the microphone</div>
+          </div>
+          <div class="state-countdown" id="countdown"></div>
+        </div>
+        <div class="state-meta">
+          <small>state: <code id="state">—</code></small>
+          &nbsp;&nbsp;<small>SR: <span id="sample-rate">—</span></small>
+          &nbsp;&nbsp;<small>wake: <code id="wake-score">—</code></small>
+          &nbsp;&nbsp;<label
+            ><input type="checkbox" id="mute-sounds" /> <span data-i18n="state.mute_sounds">mute sounds</span></label
+          >
+        </div>
+      </article>
+
+      <article>
+        <header data-i18n="current.header">Current request</header>
+        <div class="field">
+          <small data-i18n="current.heard">Heard:</small>
+          <p id="transcript">—</p>
+        </div>
+        <div class="field">
+          <small data-i18n="current.tool">Tool:</small>
+          <p id="tool">—</p>
+        </div>
+        <div class="field">
+          <small data-i18n="current.response">Reply:</small>
+          <p id="response">—</p>
+        </div>
+      </article>
+
+      <details id="speaker-panel">
+        <summary data-i18n="speaker.panel_title">Voice profiles</summary>
+        <article>
+          <div class="grid" style="grid-template-columns: 1fr auto">
+            <input id="enroll-name" type="text" data-i18n-placeholder="speaker.name_placeholder" placeholder="Your name" />
+            <button id="enroll-btn" data-i18n="speaker.record_btn">🎤 Record (5 s)</button>
+          </div>
+          <small id="enroll-status" style="color: var(--pico-muted-color)" data-i18n="speaker.enroll_hint">
+            Enter a name and press «Record» — speak for 5 seconds
+          </small>
+          <ul id="speaker-list" style="margin-top: 0.75rem; padding: 0; list-style: none"></ul>
+        </article>
+      </details>
+
+      <details id="custom-voice-panel">
+        <summary data-i18n="voice.panel_title">Output voices</summary>
+        <article>
+          <p>
+            <small style="color: var(--pico-muted-color)" data-i18n="voice.panel_hint">
+              Record 6–12 seconds of any voice (yours, family, a character) — the assistant will reply with it.  Voice per profile is chosen in «Voice profiles».
+            </small>
+          </p>
+          <div class="grid" style="grid-template-columns: 1fr auto">
+            <input id="clone-name" type="text" data-i18n-placeholder="voice.name_placeholder" placeholder="Name (e.g. «Wife»)" />
+            <button id="clone-btn" data-i18n="voice.record_btn">🎤 Record (6 s)</button>
+          </div>
+          <small id="clone-status" style="color: var(--pico-muted-color)" data-i18n="voice.clone_hint">
+            Enter a name and press «Record» — speak naturally for 6 seconds
+          </small>
+          <ul id="custom-voice-list" style="margin-top: 0.75rem; padding: 0; list-style: none"></ul>
+        </article>
+      </details>
+
+      <!--
+        Sprint-2 tier-2 sections.  Visible only when the user is logged
+        in (toggled by `loadAuthState()` in main.js).  Each is a
+        self-contained <details> following the same pattern as
+        speaker-panel and custom-voice-panel above.
+      -->
+      <details id="inbox-panel" class="auth-required" style="display:none">
+        <summary>
+          <span data-i18n="inbox.title">Voicemail</span>
+          <span id="inbox-badge" class="badge" style="display:none">0</span>
+        </summary>
+        <article>
+          <p>
+            <small style="color:var(--pico-muted-color)" data-i18n="inbox.help">
+              Messages other speakers left for you via «передай X что …» /
+              «leave a message for X: …».  Click a row to play the original
+              recording — that's the actual sender's voice.
+            </small>
+          </p>
+          <div style="display:flex; gap:0.75rem; align-items:center; margin-bottom:0.5rem">
+            <label style="margin:0">
+              <span data-i18n="inbox.mode_label">View</span>
+            </label>
+            <select id="inbox-mode" style="flex:0 0 auto; width:auto; margin:0">
+              <option value="inbox" data-i18n="inbox.mode_inbox">Inbox</option>
+              <option value="sent" data-i18n="inbox.mode_sent">Sent</option>
+            </select>
+          </div>
+          <small id="inbox-status" style="color:var(--pico-muted-color)" data-i18n="inbox.loading">Loading…</small>
+          <ul id="inbox-list" style="margin-top: 0.75rem; padding: 0; list-style: none"></ul>
+          <div class="grid" style="grid-template-columns: 1fr auto">
+            <label>
+              <input type="checkbox" id="inbox-unread-only" checked />
+              <span data-i18n="inbox.unread_only">Unread only</span>
+            </label>
+            <button id="inbox-refresh" class="outline" type="button" data-i18n="inbox.refresh">Refresh</button>
+          </div>
+        </article>
+      </details>
+
+      <!--
+        Item store (Phase 2).  Auth-required — hidden until logged in.
+        Left column: category tree (folders + checklists).
+        Right column: search, add form, item list.
+        Auto-sort dialog: Pico v2 native <dialog>.
+      -->
+      <details id="items-panel" class="auth-required" style="display:none">
+        <summary data-i18n="items.panel_title">Item Store</summary>
+        <article>
+          <!-- Search bar -->
+          <div class="items-search-bar">
+            <input id="items-search" type="search"
+                   data-i18n-placeholder="items.search_placeholder"
+                   placeholder="Search items…"
+                   autocomplete="off" />
+          </div>
+
+          <!-- Two-column layout -->
+          <div class="items-layout">
+            <!-- Left: category tree -->
+            <nav class="items-sidebar" id="items-cat-tree" aria-label="Categories">
+              <!-- rendered by items.js -->
+            </nav>
+
+            <!-- Right: item list -->
+            <section class="items-main">
+              <!-- Add item bar -->
+              <div class="items-add-bar">
+                <select id="items-kind">
+                  <option value="text"  data-i18n="items.kind_text">Note</option>
+                  <option value="link"  data-i18n="items.kind_link">Link</option>
+                  <option value="video" data-i18n="items.kind_video">Video</option>
+                </select>
+                <input id="items-add-input" type="text"
+                       data-i18n-placeholder="items.add_placeholder"
+                       placeholder="Text or URL…" />
+                <button id="items-add-btn" type="button" data-i18n="items.add_btn">Add</button>
+              </div>
+
+              <!-- Item list — populated by items.js -->
+              <ul id="items-list" class="items-list"></ul>
+
+              <!-- Toolbar -->
+              <div class="items-toolbar">
+                <small id="items-status"></small>
+                <button id="items-trash-btn" class="outline secondary" type="button"
+                        data-i18n="items.show_trash">Trash</button>
+                <button id="items-autosort-btn" class="outline" type="button"
+                        data-i18n="items.auto_sort_btn">Sort with AI</button>
+              </div>
+            </section>
+          </div>
+        </article>
+      </details>
+
+      <!-- Auto-sort preview dialog (Pico v2 native <dialog>) -->
+      <dialog id="items-modal">
+        <article>
+          <header>
+            <h3 id="items-modal-title" data-i18n="items.auto_sort_title">Suggested moves</h3>
+          </header>
+          <div id="items-modal-body"></div>
+          <div class="modal-actions">
+            <button id="items-modal-cancel" class="outline secondary" type="button"
+                    data-i18n="items.auto_sort_cancel">Cancel</button>
+            <button id="items-modal-confirm" type="button"
+                    data-i18n="items.auto_sort_apply">Apply</button>
+          </div>
+        </article>
+      </dialog>
+
+      <details id="pending-panel" class="auth-required" style="display:none">
+        <summary><span data-i18n="pending.panel_title">Deferred actions</span> <span id="pending-badge" class="badge" style="display:none">0</span></summary>
+        <article>
+          <p>
+            <small style="color:var(--pico-muted-color)" data-i18n="pending.hint">
+              Actions the assistant decided to park (no password or explicit "later").  They expire in 24 h.
+            </small>
+          </p>
+          <small id="pending-status" style="color:var(--pico-muted-color)" data-i18n="pending.loading">Loading…</small>
+          <ul id="pending-list" style="margin-top: 0.75rem; padding: 0; list-style: none"></ul>
+          <button id="pending-refresh" class="outline" type="button" data-i18n="pending.refresh">Refresh</button>
+        </article>
+      </details>
+
+      <details id="memory-panel" class="auth-required" style="display:none">
+        <summary data-i18n="memory.panel_title">Memory</summary>
+        <article>
+          <p>
+            <small style="color:var(--pico-muted-color)" data-i18n="memory.hint">
+              Freeform notes about you — the assistant reads them before every reply and writes here on «remember …» phrases.  Markdown, manually editable.
+            </small>
+          </p>
+          <textarea
+            id="memory-editor"
+            rows="10"
+            spellcheck="false"
+            style="font-family: var(--pico-font-family-monospace); font-size: 0.9rem"
+          ></textarea>
+          <div class="grid" style="grid-template-columns: auto 1fr auto">
+            <button id="memory-save" type="button" data-i18n="settings.save">Save</button>
+            <small id="memory-status" style="color:var(--pico-muted-color); align-self:center"></small>
+            <button id="memory-reload" class="outline" type="button" data-i18n="settings.reload">Reload</button>
+          </div>
+        </article>
+      </details>
+
+      <details id="settings-panel" class="auth-required" style="display:none">
+        <summary data-i18n="settings.panel_title">Settings</summary>
+        <article>
+          <p>
+            <small style="color:var(--pico-muted-color)" data-i18n="settings.panel_hint">
+              Typed profile preferences: language, formality, voice, style.  The <code>custom</code> field is a free-form object.  <code>code_word_hash</code> is not editable here — use «Change password» in the header.
+            </small>
+          </p>
+          <div class="grid" style="grid-template-columns: 1fr 1fr">
+            <label>
+              <small data-i18n="settings.label_language">Language</small>
+              <select id="settings-language">
+                <option value="auto">auto</option>
+                <option value="ru">ru</option>
+                <option value="de">de</option>
+                <option value="en">en</option>
+              </select>
+            </label>
+            <label>
+              <small data-i18n="settings.label_tone">Tone</small>
+              <select id="settings-formality">
+                <option value="casual">casual</option>
+                <option value="formal">formal</option>
+                <option value="kid">kid</option>
+              </select>
+            </label>
+          </div>
+          <label>
+            <small data-i18n="settings.label_voice">Voice (XTTS speaker name or <code>clone:&lt;id&gt;</code>)</small>
+            <input id="settings-tts-voice" type="text" placeholder="Claribel Dervla" />
+          </label>
+          <label>
+            <small data-i18n="settings.label_style">Additional style for the assistant</small>
+            <textarea
+              id="settings-style-prompt"
+              rows="3"
+              data-i18n-placeholder="settings.style_placeholder"
+              placeholder="«reply briefly», «no jokes», «no profanity» …"
+            ></textarea>
+          </label>
+          <details>
+            <summary data-i18n="settings.raw_title">Full JSON (raw)</summary>
+            <textarea
+              id="settings-raw"
+              rows="14"
+              spellcheck="false"
+              style="font-family: var(--pico-font-family-monospace); font-size: 0.85rem"
+            ></textarea>
+            <small style="color:var(--pico-muted-color)" data-i18n="settings.raw_hint">
+              Edit the structure freely — validated on save by the server (Pydantic).  The <code>custom</code> section can serve as a scratch pad for arbitrary keys.
+            </small>
+          </details>
+          <div class="grid" style="grid-template-columns: auto 1fr auto">
+            <button id="settings-save" type="button" data-i18n="settings.save">Save</button>
+            <small id="settings-status" style="color:var(--pico-muted-color); align-self:center"></small>
+            <button id="settings-reload" class="outline" type="button" data-i18n="settings.reload">Reload</button>
+          </div>
+        </article>
+      </details>
+
+      <!--
+        Connected devices (Wave 2 Phase 4).  Read-only listing of every
+        desktop-agent the orchestrator knows about, with reachability
+        and capability badges.  Cookie-auth gated like the other
+        tier-2 sections — hidden until the user is logged in.
+      -->
+      <details id="agents-panel" class="auth-required" style="display:none">
+        <summary>
+          <span data-i18n="agents.header">Connected devices</span>
+        </summary>
+        <article>
+          <small id="agents-status" style="color:var(--pico-muted-color)" data-i18n="agents.empty">No agents registered.</small>
+          <ul id="agents-list" style="margin-top: 0.75rem; padding: 0; list-style: none"></ul>
+        </article>
+      </details>
+
+      <details id="stats-section">
+        <summary data-i18n="stats.panel_title">Statistics</summary>
+        <article>
+          <div class="stats-controls">
+            <label>
+              <small data-i18n="stats.period">Period:</small>
+              <select id="stats-range">
+                <option value="day" data-i18n="stats.day">Day</option>
+                <option value="week" selected data-i18n="stats.week">Week</option>
+                <option value="month" data-i18n="stats.month">Month</option>
+              </select>
+            </label>
+            <button id="stats-refresh" class="outline" type="button" data-i18n="pending.refresh">Refresh</button>
+          </div>
+          <small id="stats-status" style="color: var(--pico-muted-color)" data-i18n="stats.loading">
+            Loading…
+          </small>
+          <div class="stats-cost" id="stats-cost"></div>
+          <div class="stats-grid">
+            <div class="stats-card">
+              <small data-i18n="stats.label_daily">Daily spend (prompt vs completion)</small>
+              <!-- Fixed-height wrapper: Chart.js with maintainAspectRatio:false
+                   inherits the parent's height, so without this the canvas
+                   would grow unboundedly (horizontal-bar charts especially —
+                   each row eats ~40 px, so 20 client_ids = ~800 px). -->
+              <div class="chart-frame chart-frame-wide"><canvas id="daily-chart"></canvas></div>
+            </div>
+            <div class="stats-card">
+              <small data-i18n="stats.label_per_tool">Spend by tool</small>
+              <div class="chart-frame"><canvas id="per-tool-chart"></canvas></div>
+            </div>
+            <div class="stats-card">
+              <small data-i18n="stats.label_per_client">Spend by client</small>
+              <div class="chart-frame"><canvas id="per-user-chart"></canvas></div>
+            </div>
+          </div>
+        </article>
+      </details>
+
+      <article>
+        <header data-i18n="log.panel_header">Log</header>
+        <pre id="log"></pre>
+      </article>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

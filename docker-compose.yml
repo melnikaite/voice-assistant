@@ -1,0 +1,223 @@
+services:
+  orchestrator:
+    build: ./orchestrator
+    container_name: va-orchestrator
+    # Host networking is REQUIRED for WebRTC media: aiortc gathers ICE
+    # candidates from its bound interfaces, and bridge-network candidates
+    # (172.x.x.x) aren't reachable from the browser running on the host.
+    # With host networking the server binds directly to the host's
+    # interfaces, so its ICE candidates resolve correctly.
+    #   • macOS / Docker Desktop: requires Docker Desktop 4.34+ with
+    #     "Enable host networking" toggled in Settings → Resources → Network.
+    #   • Linux: works out of the box.
+    # If host networking is not available, alternatives:
+    #   1. Run the orchestrator directly on the host (no Docker) for
+    #      WebRTC dev — `pip install -r requirements.txt && uvicorn app.main:app`.
+    #   2. Add a TURN server and reach the container via relay candidates.
+    network_mode: host
+    # NOTE: with network_mode: host the `ports:` block is ignored — the
+    # server binds to ${HOST_PORT:-8080} directly on the host.  The
+    # container.yml port mapping below is kept for documentation only.
+    # ports:
+    #   - "${HOST_PORT:-8080}:8000"
+    volumes:
+      - ./orchestrator/app:/app/app
+      - ./frontend:/app/static:ro
+      - ./data:/data
+    environment:
+      # With network_mode: host these target the host's loopback directly —
+      # `host.docker.internal` only works under bridge networking and isn't
+      # needed here.  If you flip back to bridge, change to host.docker.internal.
+      WHISPER_URL: http://localhost:18000
+      # The whisper-server on the host advertises its model under the alias
+      # `whisper` regardless of which weights are actually loaded (mlx-whisper
+      # quirk).  Swap the weights on the host side; this string just has to
+      # match `GET :18000/v1/models[0].id`.
+      WHISPER_MODEL: whisper
+      LLM_URL: http://localhost:1234
+      LLM_MODEL: google/gemma-4-e4b
+      # Gemma 4 E4B max_context_length = 131072 (LM Studio reports it directly).
+      # Set to the ceiling — model stops on EOS, this is just an upper bound.
+      # Input + output share this budget; our prompts are tiny (~200 tokens),
+      # so the model effectively has the whole window for output + CoT.
+      LLM_MAX_TOKENS: "131072"
+      # Per-request HTTP timeout (s). Pipeline-level cap is hard-coded to 180s.
+      LLM_TIMEOUT: "120"
+      # Optional endpoint split.  Defaults inherit LLM_URL/LLM_MODEL above,
+      # so leave commented out for a single-provider setup (LM Studio with
+      # a multimodal model handles both text and vision).  Set these only
+      # if you want different providers for text vs vision — e.g. Ollama
+      # for text + a separate multimodal endpoint for images.
+      # LLM_TEXT_URL:    "${LLM_URL}"
+      # LLM_TEXT_MODEL:  "${LLM_MODEL}"
+      # LLM_VISION_URL:  "${LLM_URL}"
+      # LLM_VISION_MODEL: "${LLM_MODEL}"
+      # Silence required to commit "user finished talking". Also the lag
+      # before processing kicks in after the last word. Commercial assistants
+      # use 0.8-1.5s.  We default to 1.8 — a touch above standard — because
+      # natural mid-thought pauses ("what... is today's date") were splitting
+      # utterances and dropping the first half into a separate cancelled
+      # turn.  See pipeline / ws.py's barge-in handling for the recovery
+      # path when the longer threshold still isn't enough.
+      VAD_SILENCE_TIMEOUT_S: "1.8"
+      VAD_MIN_SPEECH_S: "0.3"
+      # Hard cap on a single utterance length (safety net, not normal endpoint).
+      VAD_MAX_RECORD_S: "30"
+      # End-of-session: silence longer than this AFTER the TTS finished.
+      # The countdown only starts on tts_end (not on response_end), so the
+      # value is honest "real silence" time, not "silence while assistant
+      # was still talking".
+      CONTINUATION_TIMEOUT_S: "10"
+      # How many turns (user + assistant pairs) to keep as conversation context.
+      MAX_HISTORY_TURNS: "10"
+      # How long (seconds) to look back when restoring history on reconnect.
+      # After this window the session starts fresh; semantic memory still works.
+      HISTORY_RESUME_MAX_AGE_S: "1800"
+      # Whisper bias toward expected vocabulary (proper nouns, command verbs).
+      # Override via env if you start asking about different things often.
+      WHISPER_TEMPERATURE: "0.0"
+      DB_PATH: /data/assistant.db
+      # --- Semantic memory ---
+      # fastembed model to use for utterance embeddings.
+      # MiniLM-L12 paraphrase: multilingual, 384-dim, ~220 MB ONNX.
+      # Smallest multilingual model in fastembed 0.4.x — good enough for
+      # short Russian/English conversational lookups. See
+      # `TextEmbedding.list_supported_models()` for valid alternatives.
+      EMBEDDING_MODEL: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+      # How many past turns to inject as context (only above similarity threshold).
+      MEMORY_TOP_K: "3"
+      # How far back to search (days).
+      MEMORY_MAX_AGE_DAYS: "30"
+      # Minimum cosine similarity to include a past turn (0–1, higher = stricter).
+      MEMORY_SIMILARITY_THRESHOLD: "0.72"
+      # --- Speaker ID ---
+      # Minimum cosine similarity (d-vector) to positively identify a speaker.
+      # Same speaker across sessions is typically 0.80+; strangers < 0.70.
+      SPEAKER_THRESHOLD: "0.75"
+      # --- Web search ---
+      # DDG region/language code.  DDG also geo-detects from the calling IP,
+      # but the `ddgs` python lib only honours the explicit parameter, so we
+      # set it here.  de-de = Germany/German, ru-ru = Russia/Russian,
+      # us-en = US/English, wt-wt = worldwide (disable bias).
+      DDG_REGION: "de-de"
+      # How many DDG results to fetch and feed to the summariser.  Higher =
+      # more cross-source synthesis but more tokens.
+      WEB_SEARCH_MAX_RESULTS: "8"
+      # Parallel-fetch the top N result URLs and extract MAIN CONTENT
+      # (trafilatura — drops nav, sidebars, ads, cookie banners, footers,
+      # related-article rails, comments) instead of relying on the 300-char
+      # DDG preview.  Big quality bump for questions whose answer needs
+      # actual page content.  Set false to skip (faster on flaky networks).
+      WEB_SEARCH_FETCH_PAGES: "true"
+      # Race-style enrichment:
+      #   PARALLELISM = how many URLs we fire concurrently (max).
+      #   TARGET     = stop early when we have this many non-empty pages.
+      #   DEADLINE_S = wall-clock cap; cut over even without TARGET met.
+      # 10 / 5 / 4 means: shoot 10, take first 5 successes (or whatever
+      # arrives in 4 s).  Long-tail slow sites get cancelled rather than
+      # blocking summarisation.
+      WEB_SEARCH_FETCH_PARALLELISM: "10"
+      WEB_SEARCH_FETCH_TARGET: "5"
+      WEB_SEARCH_FETCH_DEADLINE_S: "4"
+      # Per-page truncation after extraction.  ~3 KB ≈ 750 tokens.  With
+      # top_n=3 that's ~9 KB of context for the summariser, very manageable.
+      WEB_SEARCH_PAGE_MAX_CHARS: "3000"
+      # Per-page HTTP timeout; one slow site can't block the whole search
+      # (parsing time is separate but bounded by trafilatura, <1 s).
+      WEB_SEARCH_PAGE_TIMEOUT_S: "8"
+      # --- TTS (XTTS-v2 via host xtts-server) ---
+      # The orchestrator does NOT run XTTS itself; it talks HTTP to a
+      # separate process on the host (see ../xtts-server/).  Same pattern
+      # as mlx-whisper and lm-studio above.  Big wins from putting it
+      # outside the container:
+      #   • PyTorch can use Apple Silicon MPS / NVIDIA CUDA (Docker
+      #     Desktop on macOS doesn't pass through Apple GPU) → ~3-5×
+      #     faster inference, RTF ~0.3 instead of ~4.
+      #   • Model (~1.8 GB) lives in ~/.cache/voice-assistant/xtts/
+      #     on the host filesystem, immune to docker volume/image
+      #     cleanup.
+      #   • Container image stays small — no coqui-tts/torchaudio/
+      #     transformers/torchcodec mountains.
+      # Start the host service with `cd xtts-server && ./start.sh` —
+      # see xtts-server/README.md for details.
+      TTS_URL: "http://localhost:9876"
+      # Optional per-orchestrator speaker override.  Leave empty to use
+      # whatever the xtts-server is configured with (XTTS_SPEAKER env
+      # in the xtts-server process).
+      XTTS_SPEAKER: ""
+      XTTS_STREAM_CHUNK_SIZE: "20"
+      # Path-mapping for voice cloning.  xtts-server runs on the host,
+      # so when the user records a custom voice the orchestrator (in
+      # container) writes the WAV under DATA_DIR_CONTAINER (/data inside)
+      # but needs to send xtts-server the path it sees from the host —
+      # DATA_DIR_HOST resolves to <repo>/data via Compose's ${PWD}
+      # interpolation.  Leave these as-is unless you change the data
+      # volume mapping in `volumes:` above.
+      DATA_DIR_HOST: "${PWD}/data"
+      DATA_DIR_CONTAINER: "/data"
+      # --- desktop-agent (host-side automation gateway) ---
+      # The `desktop` and `mail_*` LLM tools talk to a separate host
+      # process (uv-managed; see desktop-agent/README.md) that drives
+      # AppleScript / pyautogui / pywinauto / Mail.app for the
+      # orchestrator.  The agent advertises a capabilities map via
+      # /v1/capabilities — the orchestrator caches it for 60 s and uses
+      # it to render «not available on this device» when a tool is
+      # called on a platform that can't serve it.  network_mode=host
+      # means the container reaches the agent directly via loopback.
+      DESKTOP_URL: "http://localhost:9877"
+      # Shared secret protecting the daemon.  On first run the daemon
+      # generates and saves a random token in
+      # ~/.cache/voice-assistant/desktop-token — copy that value here
+      # (or set it manually and use the same value in DESKTOP_TOKEN env
+      # when launching desktop-agent/start.sh).  Empty string disables
+      # the auth header from the orchestrator side; daemon will 401.
+      DESKTOP_TOKEN: "${DESKTOP_TOKEN:-}"
+      # Multi-agent mode (Wave 2 Phase 4).  When set, this JSON list
+      # OVERRIDES DESKTOP_URL/DESKTOP_TOKEN above and the orchestrator
+      # talks to N agents instead of one — e.g. a macbook at home and a
+      # work-pc on the same tailnet.  Each entry needs `agent_id`,
+      # `url`, `token`; optional `default: true` flags the one used
+      # when the LLM doesn't pick.  Leave empty for single-agent
+      # default behaviour.  Example:
+      #   DESKTOP_AGENTS: |
+      #     [{"agent_id":"macbook","url":"http://localhost:9877",
+      #       "token":"abc","default":true},
+      #      {"agent_id":"work-pc","url":"http://work.tailnet.ts.net:9877",
+      #       "token":"xyz"}]
+      DESKTOP_AGENTS: "${DESKTOP_AGENTS:-}"
+      # How often the orchestrator polls each agent's /v1/capabilities
+      # in the background.  Lower = fresher reachable flag at the cost
+      # of more tailnet traffic; clamped to ≥5 s.
+      DESKTOP_HEALTHPOLL_INTERVAL_S: "${DESKTOP_HEALTHPOLL_INTERVAL_S:-30}"
+      # --- Wake-word (browser-side openWakeWord) ---
+      # The frontend reads these from /api/config at boot.  Model name
+      # resolves to /models/<NAME>.onnx (frontend serves frontend/models/
+      # as /models/).  Threshold is the openWakeWord score gate — 0.5 is
+      # the library default; raise for less false-wake, lower for more
+      # sensitivity.  Drop a new .onnx into frontend/models/ and change
+      # WAKE_WORD_NAME (without the .onnx suffix) to switch model.
+      WAKE_WORD_NAME: "hey_jarvis_v0.1"
+      WAKE_WORD_THRESHOLD: "0.5"
+      # --- Vision (local Gemma 4 multimodal via LM Studio) ---
+      # Vision rides on the SAME LLM endpoint (LLM_URL above) — Gemma 4
+      # is multimodal, so no separate provider, no API key, fully
+      # offline as long as LM Studio is running on the host.  The
+      # `look_at_screen` tool and the image-attached pipeline branch
+      # both use this path.  Token usage is recorded in token_usage
+      # via the standard llm_utils.chat() helper, attributed to
+      # tool_name="vision" / "look_at_screen" / "image_attached".
+      # --- News briefing ---
+      # Default topics for the `news_briefing` tool when neither the
+      # user's settings.custom.news_topics nor explicit topics in their
+      # memory.md narrow things down.  Comma-separated, in the user's
+      # primary language.  We pick safe-bet generalist topics — easy to
+      # override per-user later via the settings panel.
+      NEWS_DEFAULT_TOPICS: "tech, world news, AI"
+      NEWS_MAX_RESULTS: "6"
+      # --- Server timezone (logs, scheduled reminders) ---
+      TZ: "Europe/Berlin"
+    # extra_hosts is a no-op under network_mode: host but kept here as a
+    # reminder for anyone flipping back to bridge networking.
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    restart: unless-stopped
