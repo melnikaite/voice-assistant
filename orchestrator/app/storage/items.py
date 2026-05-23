@@ -154,6 +154,33 @@ async def get_item(item_id: int) -> dict | None:
     return _row_to_dict(row) if row else None
 
 
+def _batch_get_sync(item_ids: list[int]) -> list[tuple]:
+    if not item_ids:
+        return []
+    placeholders = ",".join("?" * len(item_ids))
+    c = _conn()
+    return c.execute(
+        f"SELECT {_SELECT_COLS} FROM items WHERE id IN ({placeholders})",
+        tuple(item_ids),
+    ).fetchall()
+
+
+async def batch_get_items(item_ids: list[int]) -> dict[int, dict]:
+    """Fetch many items by id in one query (no ownership check).
+
+    Returns a ``{item_id: row_dict}`` map for every id that exists.  Missing
+    ids are silently dropped from the result (caller can `.get(iid)` to
+    detect).  No ordering guarantee — caller must re-apply the desired
+    rank order.
+
+    Used by the hybrid-search semantic leg to fetch top-N items in one
+    round-trip instead of N separate ``get_item()`` calls.  Same
+    ownership-check contract as :func:`get_item`.
+    """
+    rows = await asyncio.to_thread(_batch_get_sync, item_ids)
+    return {r[0]: _row_to_dict(r) for r in rows}
+
+
 def _list_sync(
     owner_profile_id: int,
     *,

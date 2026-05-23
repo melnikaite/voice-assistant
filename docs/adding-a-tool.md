@@ -127,13 +127,7 @@ This single field determines whether your tool gets picked. Patterns that work:
 
 ### `risk` — three levels
 
-| Level         | When to pick it                              | What happens                                                  |
-|---------------|----------------------------------------------|---------------------------------------------------------------|
-| `"read"`      | Answer-only, no state change                 | Always runs on voice ID alone. `calculator`, `weather`, `web_search`, `my_history`. |
-| `"low_write"` | Reversible writes the user clearly initiated | Runs on voice ID alone. `reminders` — every action has a matching cancel. |
-| `"high_write"`| Invasive, destructive, hard-to-reverse       | Runs only if `is_authenticated=True`, else queued in `pending_actions`. `update_settings`, `update_memory`, calendar writes. |
-
-Pick the strictest level that's still honest. The agent never escalates or demotes. `tests/test_risk_gate.py:60` asserts unauthenticated `high_write` calls are enqueued, not executed.
+Three levels: `read` / `low_write` / `high_write` — see [architecture.md §4](architecture.md#three-risk-levels) for definitions and examples. Pick the strictest level that's still honest. `tests/test_risk_gate.py:60` asserts unauthenticated `high_write` calls are enqueued, not executed.
 
 ## The `ctx` parameter
 

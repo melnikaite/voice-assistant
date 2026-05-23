@@ -11,12 +11,11 @@ Prompt-injection hardening:
     structurally clear to the LLM where untrusted data begins and ends.
 """
 import logging
-import re
 
 import httpx
 
 from ..i18n import t
-from ..llm_utils import chat, chat_stream, extract_text
+from ..llm_utils import SentenceBuffer, chat, chat_stream, extract_text
 from ..net import has_internet
 from ..search import (
     current_locale_language,
@@ -27,48 +26,6 @@ from ..search import (
 from .base import ToolResult, tool, unwrap_ctx
 
 log = logging.getLogger(__name__)
-
-
-# ── Sentence buffer for streaming TTS ─────────────────────────────────
-#
-# The pattern matches at the START of the buffer: any non-terminator
-# characters, then one or more terminator characters, then either
-# whitespace or end-of-string.  That gives us sentence boundaries we
-# can hand off to TTS one at a time as the LLM streams.
-#
-# Imperfect on abbreviations and decimals — but for clean
-# LLM-generated voice summaries that's a low-frequency edge case, and
-# even if it splits "Mr." from "Smith" the TTS still pronounces it OK,
-# just with a small pause.  Bumping to a real NLP sentence segmenter
-# would buy us almost nothing here.
-_SENT_SPLIT = re.compile(r"^([^.!?\n]*[.!?]+)(?:\s+|\Z)", re.DOTALL)
-
-
-class _SentenceBuffer:
-    """Accumulate streaming text chunks, emit completed sentences."""
-
-    def __init__(self) -> None:
-        self._buf = ""
-
-    def feed(self, chunk: str) -> list[str]:
-        """Append text; return any sentences that became complete."""
-        self._buf += chunk
-        out: list[str] = []
-        while True:
-            m = _SENT_SPLIT.match(self._buf)
-            if not m:
-                break
-            sentence = m.group(1).strip()
-            if sentence:
-                out.append(sentence)
-            self._buf = self._buf[m.end():]
-        return out
-
-    def flush(self) -> str | None:
-        """Return whatever's left (no terminator), then clear."""
-        tail = self._buf.strip()
-        self._buf = ""
-        return tail or None
 
 
 # Query localisation strategy
@@ -299,7 +256,7 @@ async def web_search(query: str, *, ctx=None) -> ToolResult:
         # history / UI display.
         sentences_emitted = 0
         full_text = ""
-        sbuf = _SentenceBuffer()
+        sbuf = SentenceBuffer()
         try:
             async for token in chat_stream(
                 summary_messages,

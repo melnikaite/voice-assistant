@@ -57,39 +57,14 @@ Orchestrator never talks to the user directly. Browser is the only client; every
 
 ## 2. Data flow per turn
 
-End-to-end for **"set volume to 80"**, wall-clock budgets on an M-series Mac with Gemma 4 E4B local:
+Typical wall-clock budgets on an M-series Mac with Gemma 4 E4B local:
 
-```
-t=0       Browser openWakeWord crosses threshold (~80 ms after "Hey Jarvis").
-t=80ms    Browser sends {"type":"wake_detected"} over WS.
-          ws.py:817 → state = RECORDING, VadEndpointer created (ws.py:612-614).
-t=80ms    User starts speaking; WebRTC track delivers 20 ms PCM frames to
-          ws.py:670 (Session.on_mic_pcm).
-t=900ms   "set volume to 80" complete; VadEndpointer reports endpoint after
-          VAD_SILENCE_TIMEOUT_S (1.8 s default, docker-compose.yml:62).
-t=2.7s    State → PROCESSING. Pipeline.run() kicks off (ws.py:1072).
-t=2.7s    Parallel start: speaker.encode_audio (~30 ms) + transcribe (~250 ms)
-          (pipeline.py:329-346).
-t=2.95s   Transcript + speaker name latched. memory.embed_query (~120 ms)
-          starts concurrently (pipeline.py:363).
-t=3.0s    Voicemail/passphrase/intent regexes: no match — fall through.
-t=3.1s    _build_memory_context awaits embed_task + similarity scan.
-t=3.2s    run_agent() — step 0 LLM call (Gemma picks tool) ~ 1.2 s.
-t=4.4s    LLM emits tool_call computer_use(goal="set volume to 80").
-t=4.4s    agent.py:464 dispatches; computer_use re-prompts LLM to translate
-          goal → AppleScript (~1.0 s).
-t=5.4s    Script "set volume output volume 80" passes _classify_applescript_risk
-          (tools/desktop.py:124).
-t=5.4s    desktop_client.run_applescript via HTTP to :9877 (~50 ms).
-t=5.5s    AppleScript returns; ToolResult.text = "Done." (computer_use.py:366).
-t=5.5s    on_response fires; tts.stream (xtts-server :9876) produces
-          PCM chunks (~700 ms TTFB).
-t=6.2s    First TTS chunk lands in outbound RTC track. State → SPEAKING.
-t=6.7s    Track drains. State → CONTINUATION (10 s follow-up window).
-t=16.7s   No follow-up; state → LISTENING_WAKE.
-```
+- ASR + speaker-ID in parallel (~250 ms). Speaker-ID threshold 0.75 (env: `SPEAKER_THRESHOLD`); same speaker typically 0.80+, different speakers below 0.70.
+- Agent loop — LLM tool selection + tool dispatch (~1-3 s; dominant cost).
+- TTS first chunk (~300 ms TTFB after the tool returns).
+- Vision-loop fallback adds up to 6 × ~10 s per planning step (§6).
 
-Dominant latency is the agent loop (~2.2 s of LLM time: pick the tool + generate the script). Short-circuits avoid it: `intents.py` catches "повтори"/"новая тема"/etc. with zero LLM cost (pipeline.py:663), voicemail-leave skips the agent (pipeline.py:449), an attached image goes straight to vision (pipeline.py:619). Streaming text tools (`web_search`) start TTS mid-LLM-generation via `on_response_chunk` (ws.py:405) — time-to-first-audio ~1.5 s instead of 5 s.
+Short-circuits skip the agent loop: `intents.py` catches "повтори"/"новая тема" with zero LLM cost (pipeline.py:663), voicemail-leave skips the agent (pipeline.py:449), an attached image goes straight to vision (pipeline.py:619). Streaming text tools (`web_search`) start TTS mid-LLM-generation via `on_response_chunk` (ws.py:405) — time-to-first-audio ~1.5 s instead of 5 s.
 
 ---
 
@@ -150,6 +125,8 @@ Declared per tool; gated in `agent._execute_one`:
 ## 5. Read-only defence on `computer_use`
 
 `computer_use` is the most powerful tool: free-form goal → AppleScript. Contract is "read or system-state only" — no deletes, no sends, no shell escapes. Three independent gates; each alone would suffice, defence in depth means a creative LLM that bypasses two still hits the third.
+
+After one spoken passphrase, all `high_write` tools run for ~5 min (`AUTH_WINDOW_S` in `pipeline.py`); the timer resets on each successful passphrase.
 
 ### Layer 1: generator prompt
 
@@ -250,7 +227,16 @@ Defined in `storage/schema.py:16-272`:
 | `token_usage`        | Per-LLM-call row — prompt, completion, reasoning tokens, attributed to `tool_name` + `client_id`. Feeds `/api/stats`. |
 | `auth_sessions`      | UI cookie-session store (HttpOnly, server-side revocable).                                |
 
-No periodic GC. Read paths filter by `expires_at > now` so stale rows never surface; at one-user scale the tables don't grow fast enough to need pruning. Sweep helpers (`_sweep_expired_sync` etc.) exist — wire them into `scheduler.add_job` if that changes (`main.py:131-137`).
+### TTLs
+
+| Table                  | TTL    | Cleanup                                                        |
+|------------------------|--------|----------------------------------------------------------------|
+| `auth_sessions`        | 5 min  | read-path filter on `expires_at`                               |
+| `pending_actions`      | 5 min  | read-path filter on `expires_at`                               |
+| `items` (deleted)      | 7 days | scheduled `purge_expired_trash` every 6 h                      |
+| `utterances`, `token_usage` | —  | append-only, no GC                                             |
+
+No periodic GC on the expires-at rows — read paths filter so stale rows never surface; at one-user scale the tables don't grow fast enough to need pruning. Sweep helpers (`_sweep_expired_sync` etc.) exist — wire them into `scheduler.add_job` if that changes (`main.py:131-137`).
 
 ### When to add a table
 

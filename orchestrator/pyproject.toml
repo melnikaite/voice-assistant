@@ -22,6 +22,10 @@ test = [
     # load time, so any test that touches push (or transitively imports
     # main.py) needs this in the test env.
     "cryptography>=42",
+    # Required by app/scheduler.py and tools/set_reminder.py.  Without
+    # this the reminders tool fails to import (silently — the registry
+    # catches and logs), reducing test parity with production.
+    "apscheduler>=3.10,<4",
 ]
 
 [tool.pytest.ini_options]

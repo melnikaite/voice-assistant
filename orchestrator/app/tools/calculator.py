@@ -37,7 +37,7 @@ import httpx
 
 from ..i18n import currency_alias, currency_name, num_to_words, t
 from ..net import has_internet
-from .base import ToolResult, tool
+from .base import ToolResult, tool, unwrap_ctx
 
 log = logging.getLogger(__name__)
 
@@ -74,8 +74,12 @@ def _eval_node(node: ast.AST) -> float:
         if isinstance(node.value, (int, float)):
             return node.value
         raise ValueError(f"unsupported constant: {type(node.value).__name__}")
-    # ast.Num is deprecated in 3.12 but kept for forward-compat.
-    if isinstance(node, ast.Num):  # pragma: no cover
+    # ast.Num was a separate node type pre-3.8 and removed in 3.14.
+    # ``getattr`` keeps the branch alive on older interpreters that the
+    # production Docker image might still be pinned to, without raising
+    # ``AttributeError`` on newer ones.
+    _Num = getattr(ast, "Num", None)
+    if _Num is not None and isinstance(node, _Num):  # pragma: no cover
         return node.n
     if isinstance(node, ast.BinOp):
         op = _BIN_OPS.get(type(node.op))
@@ -299,8 +303,8 @@ async def calculator(
     to_ccy: str | None = None,
     ctx=None,
 ) -> ToolResult:
-    progress = getattr(ctx, "progress_sink", None) if ctx else None
-    lang = getattr(ctx, "user_lang", None) if ctx else None
+    cx = unwrap_ctx(ctx)
+    lang = cx.user_lang
 
     # ── arith ────────────────────────────────────────────────────────
     if mode == "arith":
@@ -309,8 +313,7 @@ async def calculator(
                 text=t("calculator.no_expression", lang),
                 data={"error": "no_expression"},
             )
-        if progress is not None:
-            await progress("calculate", None)
+        await cx.progress("calculate", None)
         try:
             value = safe_eval(expression)
         except ZeroDivisionError:
@@ -350,8 +353,7 @@ async def calculator(
                 text=t("offline.for_tool", lang, what=t("tool.currency", lang)),
                 data={"error": "offline", "from": from_ccy, "to": to_ccy},
             )
-        if progress is not None:
-            await progress("currency", f"{from_ccy}→{to_ccy}")
+        await cx.progress("currency", f"{from_ccy}→{to_ccy}")
 
         src = _normalize_currency(from_ccy, lang)
         dst = _normalize_currency(to_ccy, lang)

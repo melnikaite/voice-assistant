@@ -28,7 +28,7 @@ docker exec va-orchestrator pytest /app/tests -q
 
 Tests run offline — no LM Studio, mlx-whisper, xtts-server, or
 desktop-agent are required.  Adapters are stubbed via `unittest.mock`.
-The full suite is ~123 tests, runs in ~10 s.
+The full suite is ~180 tests, runs in ~10 s.
 
 To iterate on a single test:
 

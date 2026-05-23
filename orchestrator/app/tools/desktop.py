@@ -64,7 +64,7 @@ from ..desktop_client import (
 from ..i18n import t
 from ..storage import enqueue_action
 from ..user_files import read_settings
-from .base import ToolResult, tool
+from .base import ToolResult, tool, unwrap_ctx
 
 log = logging.getLogger(__name__)
 
@@ -314,10 +314,9 @@ async def desktop(
     agent_id: str | None = None,
     category: str | None = None,
 ) -> ToolResult:
-    progress = getattr(ctx, "progress_sink", None)
-    lang = getattr(ctx, "user_lang", None)
-    if progress is not None:
-        await progress("desktop", mode)
+    cx = unwrap_ctx(ctx)
+    lang = cx.user_lang
+    await cx.progress("desktop", mode)
 
     # Resolve which agent to drive.  Stamped into every ToolResult.data
     # below so the WS layer can surface `target_agent` to the UI — the
@@ -357,13 +356,13 @@ async def desktop(
         actual_targets = _extract_target_apps(script)
         all_targets = list({*declared_targets, *actual_targets})
 
-        allowed = await _get_allowed_apps(ctx)
+        allowed = await _get_allowed_apps(cx.profile_id)
         denied = [t for t in all_targets if t and t.lower() not in {a.lower() for a in allowed}]
         if denied:
             await submit_audit(
                 "desktop_denied_allowlist",
-                profile_id=getattr(ctx, "profile_id", None),
-                client_id=getattr(ctx, "client_id", None),
+                profile_id=cx.profile_id,
+                client_id=cx.client_id,
                 targets=all_targets,
                 denied=denied,
                 summary=summary,
@@ -384,16 +383,15 @@ async def desktop(
             # deferral pipeline; the LLM should have used a different
             # intent for state changes (and won't, because computer_use
             # is registered risk="read" with no high_write path).
-            user_lang = getattr(ctx, "user_lang", None)
             await submit_audit(
                 "desktop_readonly_violation",
-                profile_id=getattr(ctx, "profile_id", None),
+                profile_id=cx.profile_id,
                 category=category,
                 summary=summary,
                 script=(script or "")[:400],
             )
             return ToolResult(
-                text=t("desktop.readonly_violation", user_lang, category=category),
+                text=t("desktop.readonly_violation", lang, category=category),
                 data={
                     "error": "readonly_violation",
                     "category": category,
@@ -409,8 +407,7 @@ async def desktop(
             )
 
     # ── 3. Tier-2 gating (per-call risk, not decorator risk) ─────────
-    is_authenticated = bool(getattr(ctx, "is_authenticated", False))
-    if effective_risk == "high_write" and not is_authenticated:
+    if effective_risk == "high_write" and not cx.is_authenticated:
         # Build a fully-replayable args bundle so the pending_executor
         # can run this verbatim once approved.
         replay_args: dict[str, Any] = {"mode": mode, "risk": effective_risk, "summary": summary}
@@ -425,15 +422,15 @@ async def desktop(
             if v is not None:
                 replay_args[k] = v
         action_id = await enqueue_action(
-            profile_id=getattr(ctx, "profile_id", None),
-            client_id=getattr(ctx, "client_id", None),
+            profile_id=cx.profile_id,
+            client_id=cx.client_id,
             tool_name="desktop",
             tool_args=replay_args,
             summary=summary,
         )
         await submit_audit(
             "desktop_deferred",
-            profile_id=getattr(ctx, "profile_id", None),
+            profile_id=cx.profile_id,
             pending_action_id=action_id,
             mode=mode,
             risk=effective_risk,
@@ -528,14 +525,13 @@ async def desktop(
 # ── Per-speaker allowlist ──────────────────────────────────────────────
 
 
-async def _get_allowed_apps(ctx) -> list[str]:
+async def _get_allowed_apps(profile_id: int | None) -> list[str]:
     """Read the speaker's app allowlist from ``settings.custom.desktop_allowed_apps``.
 
     Empty list → nothing is allowed.  This is the SAFE default — the
     user explicitly opts apps in through the Settings tab once.  Avoids
     a "first-run can scriptable everything" surprise.
     """
-    profile_id = getattr(ctx, "profile_id", None)
     if profile_id is None:
         return []
     settings = await read_settings(profile_id)

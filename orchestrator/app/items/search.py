@@ -116,14 +116,16 @@ async def hybrid_search(
         top_ids = [item_id for _, item_id in scored[:sem_k]]
 
         # ── Step 5 (partial): fetch full rows for ids not already in FTS5 ──
+        # Batch the missing ids into one ``WHERE id IN (...)`` query.
+        # Without this, semantic-only matches would cost ``len(missing)``
+        # round-trips through asyncio.to_thread — up to 50 small queries
+        # for a typical top-50 candidate pool.
         fts_ids = {r["id"] for r in fts_results}
         missing_ids = [iid for iid in top_ids if iid not in fts_ids]
 
         fetched: dict[int, dict] = {r["id"]: r for r in fts_results}
-        for iid in missing_ids:
-            row = await storage_items.get_item(iid)
-            if row is not None:
-                fetched[iid] = row
+        if missing_ids:
+            fetched.update(await storage_items.batch_get_items(missing_ids))
 
         # Build sem_results in cosine-rank order.
         sem_results = [fetched[iid] for iid in top_ids if iid in fetched]

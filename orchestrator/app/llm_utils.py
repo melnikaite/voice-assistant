@@ -3,12 +3,52 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import AsyncIterator, NamedTuple
 
 import httpx
 
 log = logging.getLogger(__name__)
+
+
+# Streaming sentence boundary — match anything up to and including the
+# first sentence-ending punctuation (``.!?``), allowing newlines mid-
+# sentence.  Used by ``SentenceBuffer`` below to chunk LLM token streams
+# into TTS-sized utterances.
+_SENT_SPLIT = re.compile(r"^([^.!?\n]*[.!?]+)(?:\s+|\Z)", re.DOTALL)
+
+
+class SentenceBuffer:
+    """Accumulate streaming text chunks, emit completed sentences.
+
+    Designed for the ``chat_stream`` -> TTS path: feed each token as it
+    arrives, get back the sentences that just became complete, then
+    flush() at end-of-stream for the trailing fragment.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def feed(self, chunk: str) -> list[str]:
+        """Append text; return any sentences that became complete."""
+        self._buf += chunk
+        out: list[str] = []
+        while True:
+            m = _SENT_SPLIT.match(self._buf)
+            if not m:
+                break
+            sentence = m.group(1).strip()
+            if sentence:
+                out.append(sentence)
+            self._buf = self._buf[m.end():]
+        return out
+
+    def flush(self) -> str | None:
+        """Return whatever's left (no terminator), then clear."""
+        tail = self._buf.strip()
+        self._buf = ""
+        return tail or None
 
 LLM_URL = os.environ["LLM_URL"]
 LLM_MODEL = os.environ["LLM_MODEL"]

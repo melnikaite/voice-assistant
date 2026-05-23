@@ -174,6 +174,27 @@ async def test_purge_expired_trash():
     assert row is None
 
 
+async def test_purge_expired_trash_preserves_recent():
+    """Items deleted within the TTL window survive a GC pass.
+
+    Regression guard against the off-by-one case where the cutoff
+    compared with ``>`` instead of ``<`` and wiped fresh trash too.
+    """
+    recent_id = await create_item(
+        owner_profile_id=1, created_by_profile_id=1, kind="text", body="recent trash",
+    )
+    await delete_item(recent_id, 1)
+    # deleted_at is already "now" — well inside the 7-day window.
+
+    purged = await purge_expired_trash(max_age_days=7)
+    assert purged == 0
+
+    # Still in trash (soft-deleted but not GC'd).
+    row = await get_item(recent_id)
+    assert row is not None
+    assert row["deleted_at"] is not None
+
+
 async def test_fts_search():
     item_id = await create_item(
         owner_profile_id=1, created_by_profile_id=1,

@@ -34,7 +34,7 @@ import time
 from .. import memory
 from ..i18n import t
 from ..storage import get_candidate_utterances
-from .base import ToolResult, tool
+from .base import ToolResult, tool, unwrap_ctx
 
 log = logging.getLogger(__name__)
 
@@ -91,10 +91,10 @@ async def my_history(
     *,
     ctx,
 ) -> ToolResult:
-    profile_id = getattr(ctx, "profile_id", None)
-    client_id = getattr(ctx, "client_id", None)
-    progress = getattr(ctx, "progress_sink", None)
-    lang = getattr(ctx, "user_lang", None)
+    cx = unwrap_ctx(ctx)
+    profile_id = cx.profile_id
+    client_id = cx.client_id
+    lang = cx.user_lang
 
     if profile_id is None:
         # Speaker not identified — refuse rather than leak everyone's
@@ -126,8 +126,7 @@ async def my_history(
     if not client_id:
         return ToolResult(text=t("history.empty", lang), data={"error": "no_client_id"})
 
-    if progress is not None:
-        await progress("search", None)
+    await cx.progress("search", None)
 
     lookback_days = max(1, int(days or _DEFAULT_DAYS))
     since_ts = time.time() - lookback_days * 86400

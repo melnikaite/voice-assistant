@@ -25,7 +25,7 @@ import httpx
 
 from ..i18n import t, weather_phrase
 from ..net import has_internet
-from .base import ToolResult, tool
+from .base import ToolResult, tool, unwrap_ctx
 
 log = logging.getLogger(__name__)
 
@@ -136,12 +136,8 @@ def _format_reply(
     risk="read",
 )
 async def weather(location: str, *, ctx=None) -> ToolResult:
-    progress = getattr(ctx, "progress_sink", None) if ctx else None
-    lang = getattr(ctx, "user_lang", None) if ctx else None
-
-    async def _progress(step: str, detail: str | None = None) -> None:
-        if progress is not None:
-            await progress(step, detail)
+    cx = unwrap_ctx(ctx)
+    lang = cx.user_lang
 
     if not location or not location.strip():
         return ToolResult(
@@ -160,7 +156,7 @@ async def weather(location: str, *, ctx=None) -> ToolResult:
     log.info("weather: %r", location)
 
     async with httpx.AsyncClient(timeout=8.0) as client:
-        await _progress("geocode", location)
+        await cx.progress("geocode", location)
         geo = await _geocode(client, location)
         if geo is None:
             return ToolResult(
@@ -169,7 +165,7 @@ async def weather(location: str, *, ctx=None) -> ToolResult:
             )
         lat, lon, display = geo
 
-        await _progress("forecast", display)
+        await cx.progress("forecast", display)
         try:
             r = await client.get(
                 "https://api.open-meteo.com/v1/forecast",

@@ -57,8 +57,8 @@ answer a question without grepping the whole repo.
   a tool catalog.  The LLM picks 0–1 tools; tool output either is the
   spoken reply (`terminal=True`) or gets fed back so the LLM can
   chain (`terminal=False`).  Loop bound: 4 iterations.
-- **Tools are decorator-registered**: drop `orchestrator/app/tools/my_tool.py`,
-  decorate the handler with `@tool(...)`, restart.  No central list.
+- **Tools are decorator-registered**: drop a file under `orchestrator/app/tools/`,
+  decorate with `@tool(...)`, restart — see [`docs/adding-a-tool.md`](docs/adding-a-tool.md).
 - **Storage is local SQLite**: thread-local connections, WAL mode,
   schema in `orchestrator/app/storage/schema.py`.  Migrations are
   idempotent CREATE-IF-NOT-EXISTS — bump schema version when adding.

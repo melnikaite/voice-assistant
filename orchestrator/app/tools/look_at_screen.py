@@ -29,7 +29,7 @@ import logging
 
 from .. import desktop_client, vision
 from ..i18n import t
-from .base import ToolResult, tool
+from .base import ToolResult, tool, unwrap_ctx
 
 log = logging.getLogger(__name__)
 
@@ -84,9 +84,9 @@ def _schema() -> dict:
 async def look_at_screen(
     question: str, *, ctx=None, agent_id: str | None = None,
 ) -> ToolResult:
-    progress = getattr(ctx, "progress_sink", None) if ctx else None
-    client_id = getattr(ctx, "client_id", None) if ctx else None
-    lang = getattr(ctx, "user_lang", None) if ctx else None
+    cx = unwrap_ctx(ctx)
+    client_id = cx.client_id
+    lang = cx.user_lang
 
     # Resolve which agent to talk to BEFORE the call so we can stamp
     # the resolved id into ToolResult.data — the WS layer surfaces
@@ -102,8 +102,7 @@ async def look_at_screen(
     # gate here and let the vision call surface the transport error
     # if LM Studio went down mid-session.
 
-    if progress is not None:
-        await progress("screenshot", None)
+    await cx.progress("screenshot", None)
     try:
         png_bytes = await desktop_client.screenshot(agent_id=chosen_agent)
     except desktop_client.DesktopUnavailable as exc:
@@ -128,8 +127,7 @@ async def look_at_screen(
             data={"error": "empty_screenshot"},
         )
 
-    if progress is not None:
-        await progress("vision", None)
+    await cx.progress("vision", None)
     try:
         answer = await vision.analyze_image_bytes(
             png_bytes,

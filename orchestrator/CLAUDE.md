@@ -6,34 +6,7 @@ Patterns reference for editing orchestrator code. Start with the [root CLAUDE.md
 
 ### Adding a tool
 
-1. New module at `app/tools/<your_tool>.py`.
-2. Define one async handler. Decorate with `@tool(...)` from `app.tools.base` — registers into `TOOL_REGISTRY` on import. Auto-discovery in [`app/tools/__init__.py`](app/tools/__init__.py) imports every non-underscored module at startup.
-3. `docker compose restart orchestrator`.
-
-```python
-from .base import tool, ToolResult, unwrap_ctx
-from ..i18n import t
-
-@tool(
-    name="my_tool",
-    description="What the LLM sees in the catalog.",
-    params_schema={
-        "type": "object",
-        "properties": {"q": {"type": "string"}},
-        "required": ["q"],
-    },
-    # Defaults: terminal=True, risk="read".
-    terminal=True,
-    risk="read",
-)
-async def my_tool(q: str, ctx=None) -> ToolResult:
-    cx = unwrap_ctx(ctx)
-    await cx.progress("step_label")
-    text = t("my_tool.reply", cx.user_lang, q=q)
-    return ToolResult(text=text, data={"q": q})
-```
-
-Full walk-through: [`docs/adding-a-tool.md`](../docs/adding-a-tool.md).
+Drop a module under `app/tools/`, decorate an `async def` with `@tool(...)` from `app.tools.base`, restart. Auto-discovery in [`app/tools/__init__.py`](app/tools/__init__.py) imports it. Full walk-through, decorator params, and worked example: [`docs/adding-a-tool.md`](../docs/adding-a-tool.md).
 
 ### `ToolCtx` — use `unwrap_ctx` at the top of every tool
 
@@ -51,13 +24,7 @@ Numbers, currencies, weather codes, intents and duration phrases also live in th
 
 ### Pick the right risk level
 
-`risk=` gates execution against the speaker's auth state. Default `"read"`. Strictest level that's still honest:
-
-- `"read"` — answer-only: weather, calculator, translate, general_answer, web_search, every list-* call. Always executes.
-- `"low_write"` — reversible, low-stakes: timers, reminders, volume, music control. Voice ID alone is enough.
-- `"high_write"` — invasive / hard to reverse: edit memory, change settings, calendar writes, send mail, run AppleScript, factory-reset. Requires `ctx.is_authenticated == True` (passphrase spoken within the current 5-minute window), else enqueued in `pending_actions` ([`app/agent.py::_execute_one`](app/agent.py)).
-
-The agent loop never escalates a `read` call's risk and never demotes a `high_write` one — classification is the tool's responsibility.
+Three levels: `read` / `low_write` / `high_write` — see [`docs/architecture.md` §4](../docs/architecture.md#three-risk-levels) for definitions and examples. Gate is in [`app/agent.py::_execute_one`](app/agent.py). The agent loop never escalates or demotes — classification is the tool's responsibility.
 
 ### Terminal vs non-terminal tools
 

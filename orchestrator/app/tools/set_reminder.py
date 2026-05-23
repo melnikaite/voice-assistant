@@ -27,7 +27,7 @@ from ..storage import (
     cancel_reminder_db,
     list_upcoming_reminders,
 )
-from .base import ToolResult, tool
+from .base import ToolResult, tool, unwrap_ctx
 
 log = logging.getLogger(__name__)
 
@@ -140,24 +140,23 @@ async def set_reminder(
     fire_at: str | None = None,
     text: str | None = None,
 ) -> ToolResult:
-    lang = getattr(ctx, "user_lang", None)
-    if not ctx.client_id:
+    cx = unwrap_ctx(ctx)
+    lang = cx.user_lang
+    if not cx.client_id:
         return ToolResult(text=t("reminders.no_client", lang), data={"error": "no_client_id"})
 
     # Emit a progress step matching the action so the UI shows
     # something specific instead of the stale "Launching tool" placeholder.
-    progress = getattr(ctx, "progress_sink", None)
-    if progress is not None:
-        step_for_action = {
-            "list": "list_reminders",
-            "cancel": "cancel_reminder",
-            "create": "create_reminder",
-        }.get(action, "tool")
-        await progress(step_for_action, None)
+    step_for_action = {
+        "list": "list_reminders",
+        "cancel": "cancel_reminder",
+        "create": "create_reminder",
+    }.get(action, "tool")
+    await cx.progress(step_for_action, None)
 
     # ── list ──────────────────────────────────────────────────────────────
     if action == "list":
-        upcoming = await list_upcoming_reminders(ctx.client_id)
+        upcoming = await list_upcoming_reminders(cx.client_id)
         if not upcoming:
             return ToolResult(
                 text=t("reminders.no_upcoming", lang),
@@ -180,7 +179,7 @@ async def set_reminder(
             return ToolResult(
                 text=t("reminders.cancel_no_text", lang), data={"error": "no_text"}
             )
-        upcoming = await list_upcoming_reminders(ctx.client_id)
+        upcoming = await list_upcoming_reminders(cx.client_id)
         if not upcoming:
             return ToolResult(
                 text=t("reminders.no_upcoming", lang), data={"reminders": []}
@@ -193,12 +192,12 @@ async def set_reminder(
             )
         reminder_id = match["id"]
         sched.cancel(reminder_id)
-        await cancel_reminder_db(reminder_id, ctx.client_id)
+        await cancel_reminder_db(reminder_id, cx.client_id)
         log.info(
             "cancelled reminder %d (%r) for client %.8s… (score=%.2f)",
             reminder_id,
             match["push_text"][:40],
-            ctx.client_id,
+            cx.client_id,
             score,
         )
         return ToolResult(
@@ -269,8 +268,8 @@ async def set_reminder(
                 data={"error": f"unknown_trigger:{trigger!r}"},
             )
 
-        reminder_id = await add_reminder(ctx.client_id, fire_ts, push_text)
-        sched.schedule(reminder_id, ctx.client_id, fire_ts, push_text)
+        reminder_id = await add_reminder(cx.client_id, fire_ts, push_text)
+        sched.schedule(reminder_id, cx.client_id, fire_ts, push_text)
         return ToolResult(
             text=confirm,
             data={

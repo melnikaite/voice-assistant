@@ -205,8 +205,6 @@ def init_schema() -> None:
                     ON utterances(session_id);
                 CREATE INDEX IF NOT EXISTS idx_utterances_ts
                     ON utterances(ts);
-                CREATE INDEX IF NOT EXISTS idx_custom_voices_name
-                    ON custom_voices(name);
                 CREATE INDEX IF NOT EXISTS idx_token_usage_ts
                     ON token_usage(ts);
                 CREATE INDEX IF NOT EXISTS idx_token_usage_client_id
@@ -372,14 +370,29 @@ def init_schema() -> None:
                     ON items(category_id);
                 CREATE INDEX IF NOT EXISTS idx_items_owner_category
                     ON items(owner_profile_id, category_id);
-                CREATE INDEX IF NOT EXISTS idx_items_owner_deleted
-                    ON items(owner_profile_id, deleted_at);
+                -- Items: hot path is ``list_items`` with
+                -- ``WHERE owner_profile_id=? AND deleted_at IS NULL
+                -- ORDER BY created_at DESC`` (plus trash view with
+                -- ``deleted_at IS NOT NULL``).  The 3-col composite
+                -- covers WHERE + ORDER BY in one go — the planner
+                -- reads rows in index order without a sort step.
+                -- Supersedes the older 2-col idx_items_owner_deleted.
+                CREATE INDEX IF NOT EXISTS idx_items_owner_deleted_created
+                    ON items(owner_profile_id, deleted_at, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_items_owner_created
                     ON items(owner_profile_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_items_kind
                     ON items(owner_profile_id, kind);
                 CREATE INDEX IF NOT EXISTS idx_category_shares_profile
                     ON category_shares(profile_id);
+
+                -- Housekeeping: drop dead / superseded indexes.
+                --   idx_items_owner_deleted    — replaced by the 3-col
+                --     idx_items_owner_deleted_created above.
+                --   idx_custom_voices_name     — no call site queries
+                --     ``WHERE name=?``; voices are looked up by id only.
+                DROP INDEX IF EXISTS idx_items_owner_deleted;
+                DROP INDEX IF EXISTS idx_custom_voices_name;
                 """
             )
         finally:

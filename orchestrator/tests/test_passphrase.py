@@ -67,3 +67,15 @@ async def test_no_passphrase_set_returns_false():
         client_id="cli-no-pp", name="Empty", embedding=b"\x00" * 4 * 256,
     )
     assert await verify_passphrase(pid, "anything") is False
+
+
+async def test_rotate_replaces_old_passphrase(profile_id):
+    """set_passphrase is the rotation primitive — calling it again must
+    invalidate the previous value atomically.  Regression guard for the
+    case where rotation kept the old hash around (we'd accept either)."""
+    await set_passphrase(profile_id, "first")
+    assert await verify_passphrase(profile_id, "first") is True
+
+    await set_passphrase(profile_id, "second")
+    assert await verify_passphrase(profile_id, "second") is True
+    assert await verify_passphrase(profile_id, "first") is False
