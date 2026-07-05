@@ -45,4 +45,12 @@ dependencies = [
     "python-xlib>=0.33; sys_platform == 'linux'",
     "pywinauto>=0.6; sys_platform == 'win32'",
     "pywin32>=306; sys_platform == 'win32'",
+    # Camera capture — headless build ships no GUI, which keeps it
+    # container-safe and avoids Qt/GTK window-manager deps on Linux.
+    "opencv-python-headless>=4.8",
+    # Global hotkey listener (#41).  pynput uses Quartz on macOS,
+    # XLib on Linux, and ctypes on Windows — all in user-space; no
+    # special permissions beyond Accessibility (already needed by
+    # pyautogui on macOS).
+    "pynput>=1.7",
 ]

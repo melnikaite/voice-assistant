@@ -24,6 +24,7 @@ from typing import Any
 
 import httpx
 
+from . import desktop_client
 from .i18n import t
 from .llm_utils import ParsedToolCall, chat, extract_text, parse_tool_calls
 from .storage import enqueue_action
@@ -81,6 +82,29 @@ class AgentContext:
     user_lang: str = "en"
     stream_sink: "Any | None" = None      # Callable[[str], Awaitable[None]] | None
     progress_sink: "Any | None" = None    # Callable[[str, str | None], Awaitable[None]] | None
+    media_sink: "Any | None" = None       # Callable[[str, str], Awaitable[None]] | None
+    #   media_sink(url: str, source: str) — notifies the WS layer that a
+    #   live stream has started.  ``url`` is the relative URL the browser
+    #   should load in an <img> tag (e.g. "/api/stream/camera"); ``source``
+    #   is a short identifier ("camera" / "tab") for the UI label.
+    # Device kind for this WS session — e.g. "web", "macos_agent",
+    # "linux_agent", or None for unclassified sessions (e.g. /dev/respond).
+    # Used by the schema filter to hide device-tier tools that don't match,
+    # and by the tier gate in _execute_one as a defence-in-depth check.
+    device_kind: str | None = None
+    # True when the speaker has a live step-up grant — they tapped the
+    # Web Push approval notification for this session within the grant TTL.
+    # Read by _execute_one to gate private=True tools.  Fails closed
+    # (False = no grant).
+    step_up_auth: bool = False
+    # True when this utterance contained more than one voice (#59).
+    # profile_id is None on such turns; device-tier tools ask whose
+    # device to use instead of guessing, memory stays shared, and the
+    # auth window is not inherited.
+    mixed: bool = False
+    # Recognised household members on a mixed turn — used to phrase the
+    # clarifying question.  Empty on single-speaker turns.
+    participants: "tuple[str, ...]" = ()
 
 
 @dataclass
@@ -167,15 +191,39 @@ def _build_cached_schemas() -> list[dict]:
 _TOOL_SCHEMAS_CACHED: list[dict] | None = None
 
 
-def _schemas_with_clock(now_str: str) -> list[dict]:
-    """Return the cached tool catalog with `{now}` formatted into the
-    reminders entry.
+def _tool_visible_for_session(schema: dict, device_kind: str | None) -> bool:
+    """Return True if a tool schema should be advertised to the LLM for a
+    given session ``device_kind``.
 
-    We mutate a single nested ``description`` field on a borrowed
-    reference because every other field on every other entry is
-    immutable for the lifetime of the process — copying the whole
-    list per turn was pure waste (the catalog is ~15 entries with
-    ~1-2 KB descriptions each).
+    Rules:
+    * tier="system"  → always visible.
+    * tier="device"  → visible only when session.device_kind matches
+                        tool.device_kind exactly.  Hidden on "web" sessions
+                        and on sessions that didn't declare a device_kind.
+    * tier="api"     → always visible (token gating happens at dispatch,
+                        not at schema-advertisement time).
+    """
+    name = schema.get("function", {}).get("name")
+    if not name:
+        return True
+    entry = TOOL_REGISTRY.get(name)
+    if not entry:
+        return True
+    tier = entry.get("tier", "system")
+    if tier == "device":
+        return entry.get("device_kind") == device_kind
+    # system or api — always advertise
+    return True
+
+
+def _schemas_with_clock(now_str: str, device_kind: str | None = None) -> list[dict]:
+    """Return the tool catalog filtered for ``device_kind``, with ``{now}``
+    stamped into the reminders entry.
+
+    The global cache holds ALL schemas; we filter it here per-call (cheap
+    O(n) pass over a ~15-entry list) so device-tier tools are invisible
+    to sessions that don't have a matching desktop-agent.  Filtering
+    happens AFTER the reminders clock stamp so the logic is in one place.
     """
     global _TOOL_SCHEMAS_CACHED
     if _TOOL_SCHEMAS_CACHED is None:
@@ -195,6 +243,9 @@ def _schemas_with_clock(now_str: str) -> list[dict]:
             new_desc = base["description"].format(now=now_str) if "{now}" in base["description"] else base["description"].replace("{now}", now_str)
             out[i] = {**s, "function": {**base, "description": new_desc}}
             break
+    # Filter device-tier tools that don't match this session's device_kind.
+    # system/api tools pass through unconditionally.
+    out = [s for s in out if _tool_visible_for_session(s, device_kind)]
     return out
 
 
@@ -252,7 +303,7 @@ async def run_agent(
     # doesn't bleed into free-form answers (general_answer must NOT know
     # the date; date queries belong to web_search like any other fresh data).
     now_str = datetime.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M%z")
-    tool_schemas = _schemas_with_clock(now_str)
+    tool_schemas = _schemas_with_clock(now_str, device_kind=ctx.device_kind)
 
     messages: list[dict] = [{"role": "system", "content": system}]
     if history:
@@ -410,6 +461,162 @@ async def _execute_one(tc: ParsedToolCall, ctx: AgentContext) -> ToolInvocation:
     # fixed string so that a multi-action tool (e.g. ``items``) can
     # return "read" for list/search and "high_write" for auto_sort.
     risk: str = risk_raw(tc.args) if callable(risk_raw) else risk_raw
+
+    # ── Device-tier routing + lock gate ───────────────────────────────
+    tool_tier = meta.get("tier", "system") if meta else "system"
+    if tool_tier == "device":
+        required_device_kind = meta.get("device_kind") if meta else None
+
+        # Does the tool schema accept an explicit agent_id?
+        tool_params = (
+            (meta.get("schema") or {})
+            .get("function", {})
+            .get("parameters") or {}
+        )
+        tool_accepts_agent_id = "agent_id" in (
+            tool_params.get("properties") or {}
+        )
+
+        # ── Mixed turn (#59): ask whose device instead of guessing ─────
+        # More than one voice spoke and neither the LLM (no explicit
+        # agent_id) nor speaker-ID (no profile on mixed turns) can pin
+        # the owner.  The question ends the turn; the continuation
+        # window catches the answer, which re-enters as a clean
+        # single-speaker turn and routes through the normal profile path.
+        if (
+            ctx.mixed
+            and ctx.participants
+            and tool_accepts_agent_id
+            and not tc.args.get("agent_id")
+        ):
+            return ToolInvocation(
+                name=tc.name,
+                args=tc.args,
+                text=t(
+                    "clarify.which_device",
+                    ctx.user_lang,
+                    names=", ".join(ctx.participants),
+                ),
+                data={"clarify": "device"},
+                terminal=True,
+            )
+
+        if ctx.profile_id is not None:
+            # ── Profile-aware path: route to the speaker's personal device ──
+            # Import lazily to avoid a circular dep (device_router → storage
+            # → db, which is fine; the guard is for test isolation).
+            from . import device_router
+
+            # Only inject when the LLM didn't pick an agent explicitly.
+            if tool_accepts_agent_id and not tc.args.get("agent_id"):
+                resolved_agent = await device_router.resolve_agent_id_for_profile(
+                    ctx.profile_id, required_device_kind
+                )
+                if resolved_agent is None:
+                    return ToolInvocation(
+                        name=tc.name,
+                        args=tc.args,
+                        text=t("tool.no_personal_device", ctx.user_lang),
+                        data={
+                            "error": "no_personal_device",
+                            "device_kind": required_device_kind,
+                        },
+                        terminal=True,
+                    )
+                # Inject the resolved agent_id into the args for dispatch.
+                tc = ParsedToolCall(
+                    id=tc.id,
+                    name=tc.name,
+                    args={**tc.args, "agent_id": resolved_agent},
+                )
+
+            # Lock-state gate: only blocks when the tool explicitly
+            # declares ``needs_unlock`` AND we KNOW the device is locked.
+            # Unknown lock state (None) fails open — agent hasn't reported
+            # yet, most likely cold boot.
+            locked_compat = meta.get("locked_compat", "always") if meta else "always"
+            if locked_compat == "needs_unlock":
+                effective_agent_id = tc.args.get("agent_id")
+                agent_info = desktop_client.get_agent(effective_agent_id)
+                if agent_info is not None and agent_info.locked is True:
+                    return ToolInvocation(
+                        name=tc.name,
+                        args=tc.args,
+                        text=t("tool.device_locked", ctx.user_lang),
+                        data={
+                            "error": "device_locked",
+                            "agent_id": effective_agent_id,
+                        },
+                        terminal=True,
+                    )
+
+        else:
+            # ── Session-device path: no identified speaker ──────────────────
+            # Defence-in-depth: the schema filter already hid device tools
+            # from non-matching sessions, but catch any residual call here.
+            if required_device_kind != ctx.device_kind:
+                return ToolInvocation(
+                    name=tc.name,
+                    args=tc.args,
+                    text=t("tool.device_not_available", ctx.user_lang),
+                    data={
+                        "error": "device_mismatch",
+                        "required_device_kind": required_device_kind,
+                        "session_device_kind": ctx.device_kind,
+                    },
+                    terminal=True,
+                )
+
+    # ── Step-up gating: private tools require push-to-device approval ─
+    is_private = bool(meta.get("private", False)) if meta else False
+    if is_private and not ctx.step_up_auth:
+        if ctx.profile_id is None:
+            # Can't send a push without a known profile.
+            return ToolInvocation(
+                name=tc.name,
+                args=tc.args,
+                text=t("step_up.no_profile", ctx.user_lang),
+                data={"error": "step_up_no_profile"},
+                terminal=True,
+            )
+        # Create a challenge token and send a push notification.  The
+        # user taps the notification → SW POSTs /api/step-up/approve →
+        # orchestrator broadcasts step_up_granted WS event → session
+        # sets step_up_auth=True → user re-asks and tool executes.
+        try:
+            from .storage import create_step_up_grant, GRANT_TTL_S
+            from . import push as _push
+            challenge_token = await create_step_up_grant(
+                profile_id=ctx.profile_id,
+                client_id=ctx.client_id,
+            )
+            push_payload = {
+                "type": "step_up_request",
+                "title": t("step_up.push_title", ctx.user_lang),
+                "body": t("step_up.push_body", ctx.user_lang, tool=tc.name),
+                "tag": f"step_up_{ctx.client_id}",
+                # The SW reads ``token`` from the notification data and
+                # POSTs it to /api/step-up/approve on tap.  Token stays in
+                # the (encrypted) push payload + POST body only — never in
+                # a URL — so it can't leak via logs / history / Referer.
+                "token": challenge_token,
+                "tool": tc.name,
+                "expires_in": GRANT_TTL_S,
+            }
+            await _push.send_to_profile(ctx.profile_id, push_payload, ttl_s=GRANT_TTL_S + 10)
+            log.info(
+                "agent: step-up challenge sent for %r (profile=%d, token=%.8s…)",
+                tc.name, ctx.profile_id, challenge_token,
+            )
+        except Exception:
+            log.exception("agent: step-up push failed for %r", tc.name)
+        return ToolInvocation(
+            name=tc.name,
+            args=tc.args,
+            text=t("step_up.pending", ctx.user_lang, tool=tc.name),
+            data={"step_up_pending": True, "tool": tc.name},
+            terminal=True,
+        )
 
     # ── Tier-2 gating: defer high-write calls when no passphrase auth ─
     if risk == "high_write" and not ctx.is_authenticated:

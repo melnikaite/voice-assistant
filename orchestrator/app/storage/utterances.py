@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from .db import _conn, _lock
 
@@ -122,3 +123,81 @@ async def get_candidate_utterances(
     return await asyncio.to_thread(
         _get_candidate_utterances_sync, client_id, since_ts, limit, speaker_name
     )
+
+
+# ---------------------------------------------------------------------------
+# Read — observability: tool performance + voice turn counts
+# ---------------------------------------------------------------------------
+
+
+def _get_tool_perf_sync(days: int) -> list[dict]:
+    """Per-tool stats from utterances: call count, avg latency, error rate.
+
+    Only rows with a non-null tool_name are included (pure LLM turns
+    where the model responded directly without a tool call have
+    tool_name=NULL and are not counted here).  The error_count covers
+    any non-null ``error`` column value — network failures, unknown
+    tool, crash, etc.
+    """
+    since = time.time() - days * 86400
+    with _lock:
+        c = _conn()
+        try:
+            rows = c.execute(
+                """
+                SELECT tool_name,
+                       COUNT(*)                                       AS calls,
+                       AVG(llm_ms)                                    AS avg_ms,
+                       SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS errors
+                FROM   utterances
+                WHERE  ts > ?
+                  AND  tool_name IS NOT NULL
+                GROUP  BY tool_name
+                ORDER  BY calls DESC
+                """,
+                (since,),
+            ).fetchall()
+            return [
+                {
+                    "tool_name": row[0],
+                    "calls": int(row[1] or 0),
+                    "avg_ms": round(float(row[2] or 0)),
+                    "errors": int(row[3] or 0),
+                    "error_rate": round(int(row[3] or 0) / max(1, int(row[1] or 1)), 3),
+                }
+                for row in rows
+            ]
+        finally:
+            c.close()
+
+
+async def get_tool_perf(days: int = 7) -> list[dict]:
+    """Per-tool call count / avg latency / error rate for the last N days."""
+    return await asyncio.to_thread(_get_tool_perf_sync, days)
+
+
+def _get_voice_turns_today_sync() -> int:
+    """Count utterances with a transcript recorded today (local-day boundary)."""
+    with _lock:
+        c = _conn()
+        try:
+            # Single query: compare each row's local-day to SQLite's
+            # current local-day.  The container TZ is set to the
+            # deployment's zone, so this matches what a human means by
+            # "today".
+            row = c.execute(
+                """
+                SELECT COUNT(*)
+                FROM   utterances
+                WHERE  date(ts, 'unixepoch', 'localtime') = date('now', 'localtime')
+                  AND  transcript IS NOT NULL
+                """
+            ).fetchone()
+            return int(row[0] or 0)
+        finally:
+            c.close()
+
+
+async def get_voice_turns_today() -> int:
+    """Number of voice turns completed today (local time)."""
+    return await asyncio.to_thread(_get_voice_turns_today_sync)

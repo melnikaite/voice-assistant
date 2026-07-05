@@ -35,6 +35,14 @@ picked at startup.  The orchestrator stays platform-blind — it asks
 | `GET`  | `/v1/default_app?category=mail\|browser\|calendar\|files` | Bundle id + display name of the OS default app for the category. macOS via JXA/NSWorkspace; stubs on Linux/Windows. |
 | `GET`  | `/v1/cursor_activity` | Cursor position + idle seconds — used by the orchestrator to refuse vision-driven UI ops while the user is actively typing. |
 | `POST` | `/v1/audit` | Free-form audit log entry (intent-only events). |
+| `GET`  | `/v1/browser/tabs` | List open Chrome page tabs (Chrome DevTools Protocol). |
+| `POST` | `/v1/browser/navigate` | Navigate a Chrome tab to a URL, or open a new tab. Body: `{url, tab_id?}`. |
+| `POST` | `/v1/browser/js` | Evaluate JavaScript in a Chrome tab. Body: `{code, tab_id?, timeout?, return_by_value?}`. |
+| `GET`  | `/v1/browser/screenshot` | PNG screenshot of a specific Chrome tab. Query: `?tab_id=`. |
+| `GET`  | `/v1/browser/page_text` | Visible text of a Chrome tab (`document.body.innerText`). Query: `?tab_id=`. |
+| `GET`  | `/v1/stream/camera` | **MJPEG live stream** from the default camera. Query: `?fps=15`. HTTP-only (not reverse-WSS). |
+| `GET`  | `/v1/stream/tab` | **MJPEG live stream** of a Chrome tab via CDP. Query: `?tab_id=&fps=5`. HTTP-only. |
+| `GET`  | `/v1/hotkey/status` | Global hotkey listener state — `{enabled, combo, webhook_url}`. |
 
 All authed endpoints require header `X-Desktop-Token: <secret>`. The
 secret is read from env `DESKTOP_TOKEN`; if absent, the daemon
@@ -57,6 +65,9 @@ history isn't orphaned). Reviewable any time.
 | `hotkey`                | pyautogui | pyautogui or xdotool | pyautogui |
 | `default_apps_resolver` | JXA / NSWorkspace | no (xdg-mime TBD) | no (winreg TBD) |
 | `cursor_activity`       | pyautogui | pyautogui            | pyautogui |
+| `browser_cdp`           | yes (if Chrome running with `--remote-debugging-port`) | yes | yes |
+| `camera` (for stream)   | yes (if OpenCV + camera device accessible) | yes | yes |
+| `global_hotkey`         | yes (pynput + Accessibility permission) | yes (X11) | yes |
 
 Per-app mail/browser/calendar logic does NOT live here.  Wave 3
 collapsed it into the orchestrator's universal `computer_use` tool,
@@ -233,3 +244,6 @@ The wire protocol is v1, documented at the top of
 | `DESKTOP_MODE` | `server` | `server` (HTTP, default) or `reverse` (WSS client). |
 | `ORCHESTRATOR_URL` | empty | Required in reverse mode — e.g. `wss://my-orch.tailnet.ts.net/v1/agent/connect`. |
 | `DESKTOP_AUDIT_LOG` | `~/.cache/voice-assistant/desktop-audit.log` | Path for the per-call audit trail. |
+| `HOTKEY_COMBO` | `<ctrl>+<shift>+space` | Global dictation hotkey combo (pynput format). macOS: `<cmd>+<shift>+space` is ergonomic. |
+| `HOTKEY_ENABLED` | `1` | Set to `0` to disable the global hotkey listener. |
+| `ORCHESTRATOR_WEBHOOK_URL` | `http://localhost:8080` | Orchestrator URL the hotkey POSTs to. Same host as the orchestrator port. |

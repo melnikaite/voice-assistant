@@ -44,7 +44,7 @@ from enum import Enum
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import registry, tts
+from . import instance_settings, registry, tts
 from .i18n import t
 from .pipeline import Pipeline, PipelineHooks, PipelineOutcome
 from .storage import (
@@ -116,10 +116,12 @@ class Session(PipelineHooks):
         session_id: int,
         client_id: str | None = None,
         history: list[dict] | None = None,
+        device_kind: str | None = None,
     ):
         self.ws = ws
         self.client_id = client_id
         self.session_id = session_id
+        self.device_kind = device_kind
         self.history: list[dict] = list(history) if history else []
         self.last_response_text: str = ""
         self.last_response_lang: str = "en"
@@ -181,6 +183,12 @@ class Session(PipelineHooks):
         # (a fresh connect must re-authenticate, which is what we want).
         self.auth_until: float | None = None
         self.auth_profile_id: int | None = None
+
+        # Step-up auth window (#55).  Set via on_step_up_granted() when
+        # the speaker taps the Web Push approval notification; read back
+        # by current_step_up_auth_until() so the pipeline can inject it
+        # into AgentContext.step_up_auth.  None = never granted / expired.
+        self._step_up_auth_until: float | None = None
 
         # Image attach.  When the user picks/drops an image in the
         # UI BEFORE speaking, the frontend sends an `attach_image` WS
@@ -428,6 +436,40 @@ class Session(PipelineHooks):
         if detail:
             payload["detail"] = detail
         await self._send(payload)
+
+    async def on_media_started(self, *, url: str, source: str) -> None:
+        """Notify the browser that a live MJPEG stream has started.
+
+        The frontend renders a ``{"type":"stream_started","url":url,...}``
+        message by injecting an ``<img src=url>`` into the response area.
+        Sent before the final spoken reply so the image appears while the
+        assistant is still talking.
+        """
+        await self._send({"type": "stream_started", "url": url, "source": source})
+
+    async def on_step_up_granted(self, *, window_s: int = 300) -> None:
+        """Mark this session as step-up authorised for ``window_s`` seconds.
+
+        Called from ``registry.broadcast_step_up_granted`` when the user
+        taps the Web Push approval notification.  The expiry is checked by
+        :meth:`current_step_up_auth_until`; the pipeline reads it into
+        ``AgentContext.step_up_auth`` at the start of the next turn so the
+        gated tool can execute.
+        """
+        import time as _t
+        self._step_up_auth_until = _t.time() + window_s
+        log.info(
+            "session %d: step-up granted (window=%ds, expires=%.0f)",
+            self.session_id, window_s, self._step_up_auth_until,
+        )
+        await self._send({
+            "type": "step_up_granted",
+            "window_s": window_s,
+        })
+
+    async def current_step_up_auth_until(self) -> float | None:
+        """Return the step-up expiry timestamp, or None if not granted / expired."""
+        return self._step_up_auth_until
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -1004,6 +1046,7 @@ class Session(PipelineHooks):
                     history=self.history,
                     last_response_text=self.last_response_text,
                     attached_image_b64=attached_image_b64,
+                    device_kind=self.device_kind,
                 ),
                 timeout=PIPELINE_TIMEOUT_S,
             )
@@ -1061,11 +1104,16 @@ async def _keepalive(ws: WebSocket, interval_s: float = WS_KEEPALIVE_INTERVAL_S)
         return
 
 
-async def handle_ws(ws: WebSocket, client_id: str | None = None) -> None:
+async def handle_ws(
+    ws: WebSocket,
+    client_id: str | None = None,
+    device_kind: str | None = None,
+) -> None:
     await ws.accept()
     session_id = await start_session(
         client=ws.client.host if ws.client else None,
         client_id=client_id,
+        device_kind=device_kind,
     )
 
     initial_history: list[dict] = []
@@ -1077,7 +1125,12 @@ async def handle_ws(ws: WebSocket, client_id: str | None = None) -> None:
                 session_id, len(initial_history), client_id,
             )
 
-    session = Session(ws, session_id, client_id=client_id, history=initial_history)
+    session = Session(
+        ws, session_id,
+        client_id=client_id,
+        history=initial_history,
+        device_kind=device_kind,
+    )
 
     # Sprint-2: if the browser sent the auth cookie on the WS handshake,
     # resolve it server-side and pin the profile_id on the session
@@ -1115,6 +1168,29 @@ async def handle_ws(ws: WebSocket, client_id: str | None = None) -> None:
         except Exception:
             log.exception("ws session %d: cookie resolution failed", session_id)
 
+    # Guest-voice gate: if the session has no authenticated profile AND
+    # allow_guest_voice is False, reject the WS connection.  Guests are
+    # identified by having no session cookie (auth_profile_id is None after
+    # the cookie-resolution block above).
+    if session.auth_profile_id is None:
+        try:
+            cfg = await instance_settings.read()
+            if not cfg.allow_guest_voice:
+                log.info(
+                    "ws session %d: rejecting unauthenticated connection "
+                    "(allow_guest_voice=False)",
+                    session_id,
+                )
+                await session._send({
+                    "type": "error",
+                    "message": "login_required",
+                    "code": 4003,
+                })
+                await ws.close(code=4003)
+                return
+        except Exception:
+            log.exception("ws: guest-voice gate check failed — allowing anyway")
+
     if client_id:
         registry.register(client_id, session)
 
@@ -1122,12 +1198,15 @@ async def handle_ws(ws: WebSocket, client_id: str | None = None) -> None:
         "ws connected: session_id=%d client_id=%s history=%d",
         session_id, (client_id or "")[:8] or "—", len(initial_history),
     )
-    await session._send({
+    ready_payload: dict = {
         "type": "ready",
         "state": session.state,
         "session_id": session_id,
         "history_turns": len(initial_history) // 2,
-    })
+    }
+    if device_kind:
+        ready_payload["device_kind"] = device_kind
+    await session._send(ready_payload)
 
     if client_id:
         try:

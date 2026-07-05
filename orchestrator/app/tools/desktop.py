@@ -88,7 +88,7 @@ _DESTRUCTIVE_PATTERNS = [
     r"\bmake\s+new\b",
     r"\bset\s+(content|body|name|location|due\s+date|start\s+date)\b",
     r"\bdo\s+shell\s+script\b",     # !!!
-    r"\bemptry\s+trash\b",
+    r"\bempty\s+trash\b",
     r"\bshut\s*down\b",
     r"\brestart\b",
     r"\bdo\s+JavaScript\b",
@@ -107,6 +107,7 @@ _DESTRUCTIVE_RE = re.compile("|".join(_DESTRUCTIVE_PATTERNS), re.IGNORECASE)
 _FORBIDDEN_IN_READONLY = {
     "delete", "remove", "empty", "send", "make new", "duplicate",
     "move", "save", "close", "quit", "kill", "do shell script",
+    "do javascript",  # Safari/Chrome JS eval — code-exec, never read-only
     "set read", "set flagged", "set status",
 }
 
@@ -296,6 +297,8 @@ def _extract_target_apps(script: str) -> list[str]:
     # auto-defer EVERY desktop call.  We do per-call gating ourselves
     # below based on the LLM-declared (and pattern-validated) risk.
     risk="read",
+    tier="device",
+    device_kind="macos_agent",
 )
 async def desktop(
     *,

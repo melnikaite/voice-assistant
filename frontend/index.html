@@ -164,6 +164,22 @@
           <small data-i18n="current.response">Reply:</small>
           <p id="response">—</p>
         </div>
+        <!--
+          Live stream panel — shown when stream_camera / stream_tab fires.
+          The <img> tag displays MJPEG directly (browser handles multipart
+          internally).  Stop button revokes the src, killing the HTTP
+          connection and stopping the stream.  Hidden by default.
+        -->
+        <div id="stream-panel" style="display:none; margin-top: 0.75rem">
+          <div style="display:flex; align-items:center; gap:0.5rem; margin-bottom:0.4rem">
+            <small id="stream-label" style="color:var(--pico-muted-color)">Live</small>
+            <button id="stream-stop" class="outline secondary" type="button"
+              style="margin:0; padding:0.2rem 0.6rem; font-size:0.8rem"
+              data-i18n="stream.stop">Stop</button>
+          </div>
+          <img id="stream-img" alt="live feed"
+            style="max-width:100%; border-radius:0.4rem; display:block" />
+        </div>
       </article>
 
       <details id="speaker-panel">
@@ -439,6 +455,27 @@
           <small id="stats-status" style="color: var(--pico-muted-color)" data-i18n="stats.loading">
             Loading…
           </small>
+
+          <!-- System health strip — live snapshot from /api/stats.system -->
+          <div id="stats-system" class="stats-system" style="display:none">
+            <div class="sys-chip">
+              <small data-i18n="stats.sys_sessions">Active sessions</small>
+              <strong id="sys-sessions">—</strong>
+            </div>
+            <div class="sys-chip">
+              <small data-i18n="stats.sys_agents">Agents</small>
+              <strong id="sys-agents">—</strong>
+            </div>
+            <div class="sys-chip">
+              <small data-i18n="stats.sys_uptime">Uptime</small>
+              <strong id="sys-uptime">—</strong>
+            </div>
+            <div class="sys-chip">
+              <small data-i18n="stats.sys_turns">Turns today</small>
+              <strong id="sys-turns">—</strong>
+            </div>
+          </div>
+
           <div class="stats-cost" id="stats-cost"></div>
           <div class="stats-grid">
             <div class="stats-card">
@@ -456,6 +493,23 @@
             <div class="stats-card">
               <small data-i18n="stats.label_per_client">Spend by client</small>
               <div class="chart-frame"><canvas id="per-user-chart"></canvas></div>
+            </div>
+            <!-- Tool performance table: call count, avg latency, error rate -->
+            <div class="stats-card" id="tool-perf-card" style="display:none">
+              <small data-i18n="stats.label_tool_perf">Tool performance</small>
+              <div class="tool-perf-wrap">
+                <table id="tool-perf-table" class="tool-perf-table">
+                  <thead>
+                    <tr>
+                      <th data-i18n="stats.perf_tool">Tool</th>
+                      <th data-i18n="stats.perf_calls">Calls</th>
+                      <th data-i18n="stats.perf_avg_ms">Avg ms</th>
+                      <th data-i18n="stats.perf_errors">Errors</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tool-perf-body"></tbody>
+                </table>
+              </div>
             </div>
           </div>
         </article>

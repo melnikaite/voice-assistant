@@ -1,3 +1,9 @@
+# OPTIONAL Linux-server path.  On macOS the orchestrator runs natively
+# via uv (`orchestrator/start.sh`, com.voiceassistant.orchestrator
+# LaunchAgent) — switched 2026-06-12, see docs/architecture.md decisions
+# log.  This compose file is kept for headless Linux deployments where a
+# container is the more convenient unit.  Env defaults here mirror
+# orchestrator/start.sh — keep them in sync.
 services:
   orchestrator:
     build: ./orchestrator
@@ -28,15 +34,27 @@ services:
       # With network_mode: host these target the host's loopback directly —
       # `host.docker.internal` only works under bridge networking and isn't
       # needed here.  If you flip back to bridge, change to host.docker.internal.
-      WHISPER_URL: http://localhost:18000
-      # The whisper-server on the host advertises its model under the alias
-      # `whisper` regardless of which weights are actually loaded (mlx-whisper
-      # quirk).  Swap the weights on the host side; this string just has to
-      # match `GET :18000/v1/models[0].id`.
-      WHISPER_MODEL: whisper
-      LLM_URL: http://localhost:1234
-      LLM_MODEL: google/gemma-4-e4b
-      # Gemma 4 E4B max_context_length = 131072 (LM Studio reports it directly).
+      # ASR + LLM are both served by LocalAI on :1240 (one server, llama.cpp +
+      # whisper.cpp on Metal, com.voiceassistant.localai LaunchAgent; cutover
+      # 2026-06-12, see docs/spikes/2026-06-12-localai-spike.md).
+      WHISPER_URL: http://localhost:1240
+      # whisper.cpp large-v3 q5_0 — model id must match the YAML name in
+      # ~/.localai/models (LocalAI routes by the `model` form field).
+      WHISPER_MODEL: whisper-large-q5_0
+      # Gemma 4 E4B multimodal (text + vision + tool-calling), QAT q4_0 GGUF
+      # from LocalAI's own gallery.  The served-model id is a hard contract —
+      # it must match the YAML name in ~/.localai/models.
+      # Manual FALLBACK: any OpenAI-compatible endpoint works — e.g. Ollama
+      # (`ollama serve`, LLM_URL=http://localhost:11434) or LM Studio.  The
+      # former MLX stack (:1237/:18000) was fully retired 2026-06-12.
+      LLM_URL: http://localhost:1240
+      LLM_MODEL: gemma-4-e4b-it-qat-q4_0
+      # Disables Gemma's ADAPTIVE thinking (llama.cpp/LocalAI accept "none");
+      # measured 1-2 multi-second CoT episodes per 6 turns without it — a
+      # voice reply cannot afford that.  Wins over per-call values in
+      # llm_utils.chat()/chat_stream().
+      LLM_REASONING_EFFORT: "none"
+      # Gemma 4 E4B max_context_length = 131072 (config: max_position_embeddings).
       # Set to the ceiling — model stops on EOS, this is just an upper bound.
       # Input + output share this budget; our prompts are tiny (~200 tokens),
       # so the model effectively has the whole window for output + CoT.
@@ -44,8 +62,8 @@ services:
       # Per-request HTTP timeout (s). Pipeline-level cap is hard-coded to 180s.
       LLM_TIMEOUT: "120"
       # Optional endpoint split.  Defaults inherit LLM_URL/LLM_MODEL above,
-      # so leave commented out for a single-provider setup (LM Studio with
-      # a multimodal model handles both text and vision).  Set these only
+      # so leave commented out for a single-provider setup (one multimodal
+      # model handles both text and vision).  Set these only
       # if you want different providers for text vs vision — e.g. Ollama
       # for text + a separate multimodal endpoint for images.
       # LLM_TEXT_URL:    "${LLM_URL}"
@@ -198,10 +216,10 @@ services:
       # WAKE_WORD_NAME (without the .onnx suffix) to switch model.
       WAKE_WORD_NAME: "hey_jarvis_v0.1"
       WAKE_WORD_THRESHOLD: "0.5"
-      # --- Vision (local Gemma 4 multimodal via LM Studio) ---
+      # --- Vision (local Gemma 4 multimodal via mlx_vlm.server :1235) ---
       # Vision rides on the SAME LLM endpoint (LLM_URL above) — Gemma 4
       # is multimodal, so no separate provider, no API key, fully
-      # offline as long as LM Studio is running on the host.  The
+      # offline as long as the LLM server is running on the host.  The
       # `look_at_screen` tool and the image-attached pipeline branch
       # both use this path.  Token usage is recorded in token_usage
       # via the standard llm_utils.chat() helper, attributed to

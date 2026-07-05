@@ -58,3 +58,75 @@ async def push(client_id: str, text: str, *, reason: str = "reminder") -> bool:
     except Exception as exc:
         log.warning("push to %.8s… failed: %s", client_id, exc)
         return False
+
+
+async def broadcast_ptt_trigger(hold_ms: int = 10_000) -> int:
+    """Send a ``ptt_trigger`` event to every currently-connected session.
+
+    Called by the ``/api/hotkey/ptt`` endpoint when the desktop-agent's
+    global hotkey fires.  ``hold_ms`` is the auto-release timeout the
+    browser uses as a safety ceiling (in case the user doesn't press the
+    hotkey a second time to stop).
+
+    Returns the number of sessions that received the message.
+    Best-effort — failed sends are swallowed (closed socket etc.).
+    """
+    payload = {"type": "ptt_trigger", "hold_ms": hold_ms}
+    n = 0
+    for session in list(_sessions.values()):
+        try:
+            await session._send(payload)
+            n += 1
+        except Exception:
+            log.debug(
+                "ptt_trigger: send to %.8s… failed (likely closed)",
+                getattr(session, "client_id", "?"),
+                exc_info=True,
+            )
+    log.info("ptt_trigger: sent to %d session(s)", n)
+    return n
+
+
+async def broadcast_step_up_granted(
+    client_id: str,
+    profile_id: int,
+    window_s: int = 300,
+) -> int:
+    """Elevate the session that requested a step-up grant.
+
+    Called from ``/api/step-up/approve`` after the push notification is
+    tapped.  ``client_id`` and ``profile_id`` come from the consumed grant
+    row — NOT from the request body — so a leaked token can't elevate an
+    attacker-chosen session.  We additionally verify the live session's
+    ``auth_profile_id`` matches the grant's ``profile_id`` (defence in
+    depth: the client_id slot must still belong to the same profile that
+    requested the grant).  Sets ``_step_up_auth_until`` so the next voice
+    turn's AgentContext has ``step_up_auth=True``.
+
+    Returns 1 if the matching session was elevated, 0 otherwise.
+    """
+    session = _sessions.get(client_id)
+    if session is None:
+        log.info("step_up_granted: no active session for %.8s…", client_id)
+        return 0
+    # Defence in depth: the session occupying this client_id slot must be
+    # the same profile the grant was minted for.  Guards against a
+    # client_id being recycled by a different profile between grant
+    # creation and approval.
+    session_pid = getattr(session, "auth_profile_id", None)
+    if session_pid is not None and session_pid != profile_id:
+        log.warning(
+            "step_up_granted: profile mismatch for %.8s… (grant=%s, session=%s) — refused",
+            client_id, profile_id, session_pid,
+        )
+        return 0
+    try:
+        await session.on_step_up_granted(window_s=window_s)
+        log.info(
+            "step_up_granted → %.8s… (profile=%s, window=%ds)",
+            client_id, profile_id, window_s,
+        )
+        return 1
+    except Exception:
+        log.warning("step_up_granted: send to %.8s… failed", client_id, exc_info=True)
+        return 0

@@ -194,6 +194,13 @@ class PipelineHooks(Protocol):
     # "thinking…" placeholder.  Default no-op.
     async def on_progress(self, *, step: str, detail: str | None = None) -> None: ...
 
+    # Optional media-stream notification.  A live-streaming tool
+    # (stream_camera, stream_tab) calls this to tell the WS layer that
+    # a MJPEG stream has started so the frontend can render an <img>.
+    # ``url`` is the relative orchestrator URL; ``source`` is a short
+    # label ("camera" / "tab") for the UI.  Default no-op.
+    async def on_media_started(self, *, url: str, source: str) -> None: ...
+
     # Sprint-2 auth callbacks.  Optional; sessions without a passphrase
     # mechanism (the /dev/respond HTTP path) implement them as no-ops.
     #
@@ -210,6 +217,9 @@ class PipelineHooks(Protocol):
         self, *, profile_id: int | None, window_s: float
     ) -> None: ...
     async def cookie_profile_id(self) -> int | None: ...
+    # Step-up auth (#55).  Returns the expiry timestamp of the active
+    # step-up grant for this session, or None if no grant is live.
+    async def current_step_up_auth_until(self) -> float | None: ...
 
 
 @dataclass
@@ -245,6 +255,7 @@ class Pipeline:
         history: list[dict],
         last_response_text: str,
         attached_image_b64: str | None = None,
+        device_kind: str | None = None,
     ) -> PipelineOutcome:
         duration_ms = int(len(audio) / SAMPLE_BYTES_PER_SECOND * 1000)
         record: dict = {
@@ -292,7 +303,7 @@ class Pipeline:
             # CPU-bound (~20–60 ms) and overlaps with the Whisper HTTP call
             # (~200 ms–5 s), so total latency stays at max(asr, embed).
             spk_task = (
-                asyncio.create_task(speaker.encode_audio(audio))
+                asyncio.create_task(speaker.encode_audio_full(audio))
                 if speaker.SPEAKER_ENABLED and client_id
                 else None
             )
@@ -329,14 +340,18 @@ class Pipeline:
             if memory.EMBEDDING_ENABLED and client_id and transcript:
                 embed_task = asyncio.create_task(memory.embed_query(transcript))
 
-            speaker_name, speaker_voice, profile_id = await self._resolve_speaker(
-                spk_task, client_id, session_id
-            )
+            attr = await self._resolve_speaker(spk_task, client_id, session_id)
+            speaker_name = attr.name
+            speaker_voice = attr.tts_voice
+            profile_id = attr.profile_id
             # Cookie fallback: a UI-logged-in user gets tier-2 ability
             # even if resemblyzer hasn't matched their voice yet.  Only
             # used to *fill in* a missing profile_id — never to override
             # a voice-recognised match (which is the stronger signal).
-            if profile_id is None:
+            # Muted on mixed turns (#59): silently attributing a
+            # two-voice utterance to whoever owns the browser session is
+            # exactly the misattribution this policy exists to kill.
+            if profile_id is None and not attr.is_mixed:
                 profile_id = await self._hooks.cookie_profile_id()
                 if profile_id is not None:
                     log.info(
@@ -537,7 +552,11 @@ class Pipeline:
                     await self._hooks.on_auth_succeeded(
                         profile_id=profile_id, window_s=AUTH_WINDOW_S
                     )
-                    transcript = transcript_after or transcript_after  # drop prefix
+                    # Drop the passphrase prefix; the remainder is the real
+                    # request.  When the user said ONLY the passphrase,
+                    # transcript_after is "" and the empty-transcript ack
+                    # branch below handles it.
+                    transcript = transcript_after
                     record["transcript"] = transcript
                     log.info(
                         "session %d: passphrase OK for profile=%d", session_id, profile_id
@@ -555,7 +574,11 @@ class Pipeline:
 
             # If we didn't just authenticate, inherit any in-flight auth
             # window the session is carrying from a previous turn.
-            if not is_authenticated:
+            # NOT inherited on mixed turns (#59): a second voice inside
+            # the utterance must not ride the first speaker's window
+            # into high_write tools — those defer to pending_actions and
+            # the clarify/re-ask path instead.
+            if not is_authenticated and not attr.is_mixed:
                 until = await self._hooks.current_auth_until()
                 if until is not None and until > time.time():
                     is_authenticated = True
@@ -665,6 +688,7 @@ class Pipeline:
             mem_ctx_coro = self._build_memory_context(
                 transcript, client_id, speaker_name, session_id,
                 embed_task=embed_task,
+                participants=attr.participants if attr.is_mixed else (),
             )
             if should_replay_pending:
                 pending_coro = list_pending_actions(
@@ -725,11 +749,22 @@ class Pipeline:
             async def _progress_sink(step: str, detail: str | None = None) -> None:
                 await self._hooks.on_progress(step=step, detail=detail)
 
+            async def _media_sink(url: str, source: str) -> None:
+                await self._hooks.on_media_started(url=url, source=source)
+
             await self._hooks.on_progress(step="agent")
             # ``user_lang`` was resolved up-front from the speaker's
             # profile.settings (or defaulted to English for unknown
             # speakers).  Same value used for every t() call in this
             # turn and now passed into the agent context.
+            # Step-up auth: check whether the session has an active grant
+            # (push-to-device approval).  Checked here (not in the agent
+            # loop) so the hook stays close to the auth-window check above.
+            step_up_auth = False
+            step_up_until = await self._hooks.current_step_up_auth_until()
+            if step_up_until is not None and step_up_until > time.time():
+                step_up_auth = True
+
             ctx = AgentContext(
                 client_id=client_id,
                 profile_id=profile_id,
@@ -737,6 +772,11 @@ class Pipeline:
                 user_lang=user_lang or "en",
                 stream_sink=_stream_sink,
                 progress_sink=_progress_sink,
+                media_sink=_media_sink,
+                device_kind=device_kind,
+                step_up_auth=step_up_auth,
+                mixed=attr.is_mixed,
+                participants=attr.participants,
             )
             agent_result: AgentResult = await run_agent(
                 transcript,
@@ -812,26 +852,35 @@ class Pipeline:
         spk_task: "asyncio.Task | None",
         client_id: str | None,
         session_id: int,
-    ) -> tuple[str | None, str | None, int | None]:
+    ) -> speaker.SpeakerAttribution:
         """
         Await the parallel speaker-embedding task, match against enrolled
-        profiles, and return ``(name, tts_voice, profile_id)``.
+        profiles, and return a :class:`speaker.SpeakerAttribution`.
 
-        ``tts_voice`` is the XTTS speaker name pinned on the matched
-        profile (the household member's chosen voice), or ``None`` for
-        an unknown speaker.  ``profile_id`` is the integer primary key
-        of the matched row in ``speaker_profiles`` — used by Sprint-2
-        for per-user files (settings.json / memory.md) and auth.
+        Single-voice utterances resolve exactly as before (name +
+        tts_voice + profile_id from the best cosine match).  When the
+        windowed partials split into two voice clusters (#59), each
+        cluster is identified separately:
+
+          - clusters land on TWO distinct profiles → ``mixed_known``
+          - one profile + one stranger             → ``mixed_unknown``
+          - both clusters on the SAME profile      → single (prosody
+            swing, not two people — guard against false splits)
+          - nobody recognised                      → ``none``
+
+        Mixed modes carry no profile_id: attribution, memory writes and
+        device routing all stay conservative, and the agent asks instead
+        of guessing.
         """
         if not spk_task or not client_id:
             if spk_task and not spk_task.done():
                 spk_task.cancel()
-            return None, None, None
+            return speaker.SpeakerAttribution()
         try:
             profiles_raw = await get_speaker_profiles(client_id)
-            spk_emb = await spk_task
+            spk_emb, partials = await spk_task
             if spk_emb is None or not profiles_raw:
-                return None, None, None
+                return speaker.SpeakerAttribution()
             # Stored as float32 (resemblyzer's native dtype: 256-dim × 4 B
             # = 1024 B). Reading as float64 silently halves the dimension.
             # Row shape: (id, name, embedding_bytes, sample_count, tts_voice).
@@ -839,9 +888,36 @@ class Pipeline:
                 (nm, np.frombuffer(bl, dtype=np.float32))
                 for _, nm, bl, _, _ in profiles_raw
             ]
+
+            clusters = (
+                speaker.split_speakers(partials) if partials is not None else []
+            )
+            if len(clusters) >= 2:
+                matches = [speaker.identify(c, decoded)[0] for c in clusters]
+                known = [n for n in matches if n]
+                distinct = list(dict.fromkeys(known))
+                if len(distinct) >= 2:
+                    log.info(
+                        "session %d mixed utterance: known speakers %s",
+                        session_id, distinct,
+                    )
+                    return speaker.SpeakerAttribution(
+                        mode="mixed_known", participants=tuple(distinct)
+                    )
+                if len(distinct) == 1 and len(known) < len(matches):
+                    log.info(
+                        "session %d mixed utterance: %r + unknown voice",
+                        session_id, distinct[0],
+                    )
+                    return speaker.SpeakerAttribution(
+                        mode="mixed_unknown", participants=tuple(distinct)
+                    )
+                # Both clusters resolved to the same profile (or none):
+                # not two people — fall through to whole-utterance match.
+
             name, score = speaker.identify(spk_emb, decoded)
             if not name:
-                return None, None, None
+                return speaker.SpeakerAttribution()
             # Match found — pull the tts_voice + profile_id from the same
             # row.  Linear scan is fine: enrolled profiles per client
             # typically fit on one hand.
@@ -856,10 +932,12 @@ class Pipeline:
                 "session %d speaker=%r score=%.3f voice=%r profile=%s",
                 session_id, name, score, voice, profile_id,
             )
-            return name, voice, profile_id
+            return speaker.SpeakerAttribution(
+                mode="single", name=name, tts_voice=voice, profile_id=profile_id
+            )
         except Exception as exc:
             log.warning("session %d speaker ID error: %s", session_id, exc)
-            return None, None, None
+            return speaker.SpeakerAttribution()
 
     async def _build_memory_context(
         self,
@@ -869,6 +947,7 @@ class Pipeline:
         session_id: int,
         *,
         embed_task: "asyncio.Task | None" = None,
+        participants: "tuple[str, ...]" = (),
     ) -> str:
         """
         Stitch together the system-prompt context block: speaker tag plus
@@ -881,7 +960,20 @@ class Pipeline:
         task was passed (e.g. callers that pre-date this change, or
         the embed_task ended up None because memory was disabled).
         """
-        ctx = f"[Current speaker: {speaker_name}]\n" if speaker_name else ""
+        if speaker_name:
+            ctx = f"[Current speaker: {speaker_name}]\n"
+        elif participants:
+            # Mixed turn (#59): tell the model several people spoke so it
+            # asks instead of guessing whenever the request needs a
+            # personal device or personal memory.
+            ctx = (
+                "[Mixed turn: more than one person spoke. Recognised: "
+                + ", ".join(participants)
+                + ". Do not attribute the request to one person; if it"
+                " needs a personal device or personal data, ask whose.]\n"
+            )
+        else:
+            ctx = ""
         if not (memory.EMBEDDING_ENABLED and client_id):
             # If somebody scheduled a task that's now dead weight, cancel.
             if embed_task is not None and not embed_task.done():

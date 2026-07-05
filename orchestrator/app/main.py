@@ -1,25 +1,35 @@
+import base64
 import logging
 import os
+import time as _time
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, WebSocket
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, WebSocket
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import Response as StarletteResponse
 
-from . import agent_proxy, desktop_client, memory, pending_executor, push, scheduler, speaker, tts
+from . import agent_proxy, desktop_client, instance_settings, memory, pending_executor, push, registry, scheduler, speaker, tts
 from .search import current_region as _current_search_region
 from .agent import AgentContext
 from .llm import respond
 from .routes import (
     agents as agents_routes,
     auth as auth_routes,
+    devices as devices_routes,
+    hotkey as hotkey_routes,
+    instance as instance_routes,
     items as items_routes,
     memory as memory_routes,
     pending as pending_routes,
     push as push_routes,
     speakers as speakers_routes,
+    step_up as step_up_routes,
+    stream as stream_routes,
     voicemail as voicemail_routes,
     voices as voices_routes,
 )
@@ -29,12 +39,18 @@ from .storage import (
     get_daily_usage,
     get_per_tool_usage,
     get_per_user_usage,
+    get_tool_perf,
+    get_voice_turns_today,
     init_schema,
     save_utterance,
     start_session,
 )
+from .routes._deps import _current_user
 from .storage.items import purge_expired_trash
 from .ws import handle_ws
+
+# Process start time for uptime reporting in /api/stats.
+_START_TIME: float = _time.time()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,10 +78,85 @@ except ValueError:
     WAKE_WORD_THRESHOLD = 0.5
 
 
+# ── Basic Auth middleware (optional outer layer, #43) ─────────────────────
+#
+# When instance_settings has basic_auth_user + basic_auth_password_hash,
+# all HTTP routes except /health and WS upgrades require HTTP Basic Auth.
+# Goal: anti-scanner / anti-DDoS protection so random internet crawlers
+# can't trigger expensive LLM / ASR calls just by hitting the public URL.
+# This is NOT a substitute for profile auth — it's the "door before the
+# house".  Browser WebSocket upgrades are excluded because the browser
+# can't send Basic Auth credentials on a WS upgrade; those are guarded by
+# the va_session cookie and (optionally) the allow_guest_voice flag.
+
+_BASIC_AUTH_SKIP = frozenset({"/health", "/ws", "/v1/agent/connect"})
+
+
+class _BasicAuthMiddleware(BaseHTTPMiddleware):
+    """ASGI middleware that enforces HTTP Basic Auth when configured.
+
+    Skips paths in ``_BASIC_AUTH_SKIP`` and any path starting with ``/ws``
+    (WebSocket upgrades).  All other paths get a 401 challenge on missing
+    or wrong credentials.
+    """
+
+    def __init__(self, app, username: str, password_hash: str) -> None:
+        super().__init__(app)
+        self._username = username
+        self._password_hash = password_hash
+
+    async def dispatch(
+        self, request: StarletteRequest, call_next
+    ) -> StarletteResponse:
+        path = request.url.path
+        # Exclude health probe + WebSocket upgrade paths.
+        if path in _BASIC_AUTH_SKIP or path.startswith("/ws"):
+            return await call_next(request)
+
+        auth = request.headers.get("Authorization", "")
+        if not auth.lower().startswith("basic "):
+            return Response(
+                "Unauthorized",
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="voice-assistant"'},
+            )
+        try:
+            decoded = base64.b64decode(auth[6:]).decode("utf-8")
+            sent_user, _, sent_pass = decoded.partition(":")
+        except Exception:
+            return Response("Unauthorized", status_code=401)
+
+        # Constant-time username compare + always-run bcrypt so the
+        # response timing doesn't reveal whether the username was correct
+        # (no short-circuit before the hash check → no username oracle).
+        import hmac
+        import bcrypt  # local import keeps bcrypt optional
+        user_ok = hmac.compare_digest(sent_user, self._username)
+        try:
+            pass_ok = bcrypt.checkpw(
+                sent_pass.encode("utf-8"),
+                self._password_hash.encode("ascii"),
+            )
+        except Exception:
+            pass_ok = False
+        if not (user_ok and pass_ok):
+            return Response("Unauthorized", status_code=401)
+
+        return await call_next(request)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("init storage...")
     init_schema()
+    # NOTE: Basic Auth middleware is installed at app-CONSTRUCTION time
+    # (see below ``app = FastAPI(...)``), NOT here.  Starlette builds its
+    # middleware stack on the first request, which happens AFTER lifespan
+    # startup — so ``add_middleware`` from inside lifespan either raises
+    # "Cannot add middleware after an application has started" or silently
+    # no-ops, leaving the door wide open.  Reading the settings file
+    # synchronously at import is fine: Basic Auth already requires a
+    # restart to take effect.
     log.info("init VAPID keypair (Web Push)...")
     try:
         push.init_vapid()
@@ -105,6 +196,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="voice-assistant", lifespan=lifespan)
+
+# ── Outer Basic Auth (#43) — installed at construction, NOT in lifespan ──
+# Starlette builds its middleware stack on the first request (after lifespan
+# startup), so add_middleware() must run here, before the app starts serving.
+# We read instance settings synchronously at import; enabling/disabling Basic
+# Auth already requires a restart, so a one-time read at boot is correct.
+_instance_cfg = instance_settings._read_sync()
+if _instance_cfg.basic_auth_user and _instance_cfg.basic_auth_password_hash:
+    app.add_middleware(
+        _BasicAuthMiddleware,
+        username=_instance_cfg.basic_auth_user,
+        password_hash=_instance_cfg.basic_auth_password_hash,
+    )
+    log.info("instance: Basic Auth enabled for user %r", _instance_cfg.basic_auth_user)
+
 app.include_router(auth_routes.router)
 app.include_router(speakers_routes.router)
 app.include_router(voices_routes.router)
@@ -113,7 +219,12 @@ app.include_router(pending_routes.router)
 app.include_router(push_routes.router)
 app.include_router(voicemail_routes.router)
 app.include_router(agents_routes.router)
+app.include_router(devices_routes.router)
+app.include_router(hotkey_routes.router)
+app.include_router(instance_routes.router)
 app.include_router(items_routes.router)
+app.include_router(step_up_routes.router)
+app.include_router(stream_routes.router)
 
 
 async def _probe(client: httpx.AsyncClient, url: str, expected_model: str) -> dict:
@@ -136,16 +247,21 @@ async def api_config() -> dict:
     """
     Per-deployment configuration the frontend needs at boot.
 
-    Today this surfaces only the wake-word knobs (model name + score
-    threshold) so they're configurable via env (WAKE_WORD_NAME,
-    WAKE_WORD_THRESHOLD) instead of hard-coded in main.js.  Same pattern
-    can extend to other browser-visible settings later (locale, sample
-    rate, etc.) without a code change on the frontend.
+    Surfaces wake-word knobs (configurable via env) and instance-level
+    flags the UI needs to decide which controls to show.
     """
+    cfg = await instance_settings.read()
     return {
         "wake_word": {
             "name": WAKE_WORD_NAME,
             "threshold": WAKE_WORD_THRESHOLD,
+        },
+        "instance": {
+            "registration_open": cfg.registration_open,
+            "allow_guest_voice": cfg.allow_guest_voice,
+            "basic_auth_configured": bool(
+                cfg.basic_auth_user and cfg.basic_auth_password_hash
+            ),
         },
     }
 
@@ -173,7 +289,6 @@ class TextRequest(BaseModel):
 async def dev_respond(req: TextRequest) -> JSONResponse:
     """Bypass ASR — feed a transcript directly to the agent loop."""
     import json as _json
-    import time as _time
 
     session_id = await start_session(client="dev", client_id=req.client_id)
     ctx = AgentContext(client_id=req.client_id or "dev-client")
@@ -204,8 +319,15 @@ async def dev_respond(req: TextRequest) -> JSONResponse:
 
 
 @app.get("/api/stats")
-async def stats(range: str = "week") -> JSONResponse:
-    """LLM token usage stats for the dashboard.
+async def stats(
+    range: str = "week",
+    _user: dict = Depends(_current_user),
+) -> JSONResponse:
+    """Token usage + operational stats for the observability dashboard.
+
+    Requires a logged-in session (``va_session`` cookie): the payload
+    exposes per-user token totals, per-client breakdown, live session
+    counts and cost — owner-level operational data, not public.
 
     ``range`` controls the lookback window: ``day`` (1 d), ``week`` (7 d,
     default), ``month`` (30 d).  Unknown values fall back to ``week`` —
@@ -213,21 +335,48 @@ async def stats(range: str = "week") -> JSONResponse:
 
     Payload:
       • ``daily``      — per-day prompt/completion totals (stacked bar)
-      • ``per_tool``   — per-tool totals (horizontal bar)
-      • ``per_user``   — per-client_id totals (horizontal bar)
-      • ``cost``       — projected $-cost per pricing tier (Claude /
-                         GPT-4o-mini / local Gemma) over the range
-      • ``pricing``    — the rate table used for ``cost``, so the UI can
-                         label its summary ("if you had used … it would
-                         have cost …")
-      • ``range``      — echoed back, helps the client confirm it asked
-                         for the right window after a network glitch
+      • ``per_tool``   — per-tool token totals (horizontal bar)
+      • ``per_user``   — per-client_id token totals (horizontal bar)
+      • ``cost``       — projected $-cost per pricing tier
+      • ``pricing``    — rate table used for ``cost``
+      • ``range``      — echoed back for client validation
+      • ``tool_perf``  — per-tool call count, avg latency, error rate
+                         (from utterances, not token_usage — captures
+                         every tool turn including zero-token fast-paths)
+      • ``system``     — live health snapshot: active WS sessions,
+                         reachable desktop agents, process uptime,
+                         voice turns completed today
     """
     days = {"day": 1, "week": 7, "month": 30}.get(range, 7)
-    daily = await get_daily_usage(days)
-    per_tool = await get_per_tool_usage(days)
-    per_user = await get_per_user_usage(days)
+
+    # Run all DB queries concurrently — each holds the SQLite lock
+    # briefly; parallelising them via gather shaves ~50 ms vs serial.
+    import asyncio as _asyncio
+    (
+        daily,
+        per_tool,
+        per_user,
+        tool_perf,
+        turns_today,
+    ) = await _asyncio.gather(
+        get_daily_usage(days),
+        get_per_tool_usage(days),
+        get_per_user_usage(days),
+        get_tool_perf(days),
+        get_voice_turns_today(),
+    )
     cost = compute_projected_cost(daily)
+
+    # System snapshot — read from in-process state, no I/O.
+    agents = desktop_client.list_agents()
+    system = {
+        "active_sessions": len(registry._sessions),
+        "agents_total": len(agents),
+        "agents_reachable": sum(1 for a in agents if a.reachable),
+        "uptime_s": int(_time.time() - _START_TIME),
+        "turns_today": turns_today,
+    }
+
     return JSONResponse(
         {
             "range": range,
@@ -237,6 +386,8 @@ async def stats(range: str = "week") -> JSONResponse:
             "per_user": per_user,
             "cost": cost,
             "pricing": PRICING,
+            "tool_perf": tool_perf,
+            "system": system,
         }
     )
 
@@ -254,8 +405,29 @@ async def ws_agent_connect(websocket: WebSocket) -> None:
 
 
 @app.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket, client_id: str | None = None):
-    await handle_ws(websocket, client_id=client_id)
+async def ws_endpoint(
+    websocket: WebSocket,
+    client_id: str | None = None,
+    device_kind: str | None = None,
+):
+    """Main voice-assistant WebSocket.
+
+    Query params:
+      ``client_id``   — stable browser/agent identifier (persisted to DB).
+      ``device_kind`` — type of this client: ``"web"`` (browser PWA, default),
+                        ``"macos_agent"`` or ``"linux_agent"`` (desktop-agent
+                        process).  Controls which tool tier is visible for this
+                        session — device-tier tools are hidden when
+                        ``device_kind`` doesn't match.
+    """
+    await handle_ws(websocket, client_id=client_id, device_kind=device_kind)
 
 
-app.mount("/", StaticFiles(directory="/app/static", html=True), name="static")
+app.mount(
+    "/",
+    # Native service runs from orchestrator/ with the PWA one level up
+    # (STATIC_DIR=../frontend); the docker-compose path mounts ../frontend
+    # at /app/static, which stays the default.
+    StaticFiles(directory=os.environ.get("STATIC_DIR", "/app/static"), html=True),
+    name="static",
+)

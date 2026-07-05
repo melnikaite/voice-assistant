@@ -1,10 +1,10 @@
 import logging
 
-from fastapi import APIRouter, UploadFile
+from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from .. import speaker
+from .. import instance_settings, speaker
 from ..storage import (
     delete_speaker_profile,
     get_speaker_profile_by_name,
@@ -72,6 +72,20 @@ async def enroll_speaker(
     ``audio`` must be raw PCM: signed 16-bit, mono, 16 kHz.
     """
     import numpy as np
+
+    # Check instance-level registration gate.  Existing profiles
+    # (running-mean update path below) bypass this check so re-enrolling
+    # a sample for an already-enrolled voice still works when registration
+    # is closed.
+    cfg = await instance_settings.read()
+    if not cfg.registration_open:
+        existing_check = await get_speaker_profile_by_name(client_id, name)
+        if not existing_check:
+            raise HTTPException(
+                403,
+                "Registration is closed — new profiles cannot be enrolled. "
+                "To reopen, edit /data/settings.json and restart.",
+            )
 
     if not speaker.SPEAKER_ENABLED:
         return JSONResponse({"error": "speaker_encoder_unavailable"}, status_code=503)

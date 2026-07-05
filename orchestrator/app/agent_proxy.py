@@ -364,6 +364,36 @@ async def handle_agent_connect(websocket: WebSocket) -> None:
                 # We don't actively send pings today, but accept them
                 # silently for protocol forward-compat.
                 info.last_seen = time.time()
+            elif ftype == "heartbeat":
+                # Extended heartbeat from the agent — carries lock state
+                # and optionally other telemetry.  Replaces / supplements
+                # the bare ``ping`` for agents that want richer reporting.
+                info.last_seen = time.time()
+                info.reachable = True
+                locked = frame.get("locked")
+                if locked is not None:
+                    desktop_client.update_agent_lock_state(agent_id, bool(locked))
+                # Update last_seen_at in profile_devices if this agent is
+                # paired with a profile.  Async fire-and-forget — we don't
+                # await because the recv loop must stay responsive.
+                asyncio.create_task(_touch_paired_device(agent_id))
+                log.debug(
+                    "agent_proxy[%s]: heartbeat (locked=%s)",
+                    agent_id, locked,
+                )
+            elif ftype == "pair":
+                # Desktop-agent claims a pairing code so it can be linked
+                # to a profile without a Settings UI.
+                # Frame: {"type": "pair", "code": "123456",
+                #         "friendly_name": "Mom's MacBook"}
+                code = str(frame.get("code") or "").strip()
+                friendly_name = str(frame.get("friendly_name") or agent_id)
+                if code:
+                    asyncio.create_task(
+                        _handle_pair_frame(agent_id, code, friendly_name, websocket)
+                    )
+                else:
+                    log.warning("agent_proxy[%s]: pair frame missing code", agent_id)
             elif ftype == "hello":
                 # Duplicate hello — ignore.
                 log.debug("agent_proxy[%s]: duplicate hello, ignoring", agent_id)
@@ -378,6 +408,51 @@ async def handle_agent_connect(websocket: WebSocket) -> None:
     finally:
         if conn is not None:
             await conn.close(reason="recv_loop_exit")
+
+
+async def _touch_paired_device(agent_id: str) -> None:
+    """Update profile_devices.last_seen_at for the agent, best-effort."""
+    try:
+        from .storage.profile_devices import touch_device
+        await touch_device(agent_id)
+    except Exception:
+        pass
+
+
+async def _handle_pair_frame(
+    agent_id: str, code: str, friendly_name: str, websocket: WebSocket
+) -> None:
+    """Consume a pairing code and link agent_id to the profile.
+
+    Sends ``pair_ack`` with ``ok=true`` on success or
+    ``pair_ack`` with ``ok=false, reason=...`` on failure.
+    """
+    try:
+        from .storage.profile_devices import consume_pairing_code
+        result = await consume_pairing_code(code, agent_id, friendly_name)
+        if result is None:
+            log.warning(
+                "agent_proxy[%s]: pair code %r invalid/expired", agent_id, code
+            )
+            await websocket.send_text(json.dumps({
+                "type": "pair_ack",
+                "ok": False,
+                "reason": "invalid_or_expired_code",
+            }))
+        else:
+            profile_id, device_kind = result
+            log.info(
+                "agent_proxy[%s]: paired to profile=%d device_kind=%s",
+                agent_id, profile_id, device_kind,
+            )
+            await websocket.send_text(json.dumps({
+                "type": "pair_ack",
+                "ok": True,
+                "profile_id": profile_id,
+                "device_kind": device_kind,
+            }))
+    except Exception:
+        log.exception("agent_proxy[%s]: pair frame handling failed", agent_id)
 
 
 async def _reject(websocket: WebSocket, reason: str) -> None:

@@ -34,7 +34,8 @@ def init_schema() -> None:
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
                     started_at  REAL    NOT NULL,
                     client      TEXT,
-                    client_id   TEXT
+                    client_id   TEXT,
+                    device_kind TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS utterances (
@@ -113,6 +114,40 @@ def init_schema() -> None:
                 -- and /api/users/<...> request.  Server-side so we can
                 -- revoke without rotating keys; the table stays tiny
                 -- (one row per active browser-tab).
+                -- Profile-device pairing (#50): maps a speaker_profile to
+                -- the desktop-agent (device_uid = agent_id in desktop_client)
+                -- that should receive device-tier tool calls for that profile.
+                -- is_default = 1 for the preferred device when multiple are
+                -- paired.  WoL fields are optional — when both are set, the
+                -- router sends a magic packet before the call if the device
+                -- hasn't heartbeated recently.
+                CREATE TABLE IF NOT EXISTS profile_devices (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id      INTEGER NOT NULL REFERENCES speaker_profiles(id) ON DELETE CASCADE,
+                    device_kind     TEXT    NOT NULL,
+                    device_uid      TEXT    NOT NULL,
+                    friendly_name   TEXT    NOT NULL DEFAULT '',
+                    is_default      INTEGER NOT NULL DEFAULT 0,
+                    wol_mac         TEXT,
+                    wol_target_ip   TEXT,
+                    last_seen_at    REAL,
+                    created_at      REAL    NOT NULL,
+                    UNIQUE(profile_id, device_uid)
+                );
+
+                -- Ephemeral 6-digit pairing codes.  The desktop-agent sends
+                -- the code it was given on its reverse-WSS hello so the
+                -- orchestrator can map agent_id → profile_id without a
+                -- Settings UI.  Each code expires in 5 minutes and is
+                -- single-use (``used = 1`` after consumption).
+                CREATE TABLE IF NOT EXISTS device_pairing_codes (
+                    code        TEXT    PRIMARY KEY,
+                    profile_id  INTEGER NOT NULL,
+                    device_kind TEXT    NOT NULL,
+                    expires_at  REAL    NOT NULL,
+                    used        INTEGER NOT NULL DEFAULT 0
+                );
+
                 CREATE TABLE IF NOT EXISTS auth_sessions (
                     token        TEXT    PRIMARY KEY,
                     profile_id   INTEGER NOT NULL,
@@ -173,6 +208,8 @@ def init_schema() -> None:
             # ── Phase 2: backfill columns on pre-existing tables ──────────
             _add_columns(c, [
                 ("sessions",         "client_id",    "TEXT"),
+                # Tool-tiering (#48): what kind of client connected.
+                ("sessions",         "device_kind",  "TEXT"),
                 ("utterances",       "embedding",    "BLOB"),
                 ("utterances",       "speaker_name", "TEXT"),
                 ("utterances",       "is_shared",    "INTEGER NOT NULL DEFAULT 0"),
@@ -385,6 +422,27 @@ def init_schema() -> None:
                     ON items(owner_profile_id, kind);
                 CREATE INDEX IF NOT EXISTS idx_category_shares_profile
                     ON category_shares(profile_id);
+
+                -- Profile-device pairing (#50)
+                CREATE INDEX IF NOT EXISTS idx_profile_devices_profile
+                    ON profile_devices(profile_id);
+                CREATE INDEX IF NOT EXISTS idx_profile_devices_uid
+                    ON profile_devices(device_uid);
+                CREATE INDEX IF NOT EXISTS idx_pairing_codes_expires
+                    ON device_pairing_codes(expires_at);
+
+                -- Step-up auth grants (#55): push-to-device approval tokens.
+                -- Each row is a pending approval; consumed ones are deleted
+                -- immediately; expired ones are purged by the scheduler GC.
+                CREATE TABLE IF NOT EXISTS step_up_grants (
+                    token       TEXT    PRIMARY KEY,
+                    profile_id  INTEGER NOT NULL,
+                    client_id   TEXT,
+                    issued_at   REAL    NOT NULL,
+                    expires_at  REAL    NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_step_up_expires
+                    ON step_up_grants(expires_at);
 
                 -- Housekeeping: drop dead / superseded indexes.
                 --   idx_items_owner_deleted    — replaced by the 3-col

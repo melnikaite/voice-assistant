@@ -47,10 +47,19 @@ Endpoints (all under /v1/):
   POST /v1/applescript      — run AppleScript via osascript (macOS only)
   POST /v1/pyautogui        — structured cross-platform automation
   POST /v1/key              — keyboard shortcut (e.g. cmd+space)
-  GET  /v1/screenshot       — full-screen PNG snapshot
-  POST /v1/audit            — write a free-form audit entry
-  GET  /v1/default_app      — resolve the user's default app for a category
-  GET  /v1/cursor_activity  — cursor position + idle-seconds (conflict guard)
+  GET  /v1/screenshot            — full-screen PNG snapshot
+  GET  /v1/camera                — single JPEG frame from the default camera device
+  POST /v1/audit                 — write a free-form audit entry
+  GET  /v1/default_app           — resolve the user's default app for a category
+  GET  /v1/cursor_activity       — cursor position + idle-seconds (conflict guard)
+  GET  /v1/browser/tabs          — list open Chrome page tabs (CDP)
+  POST /v1/browser/navigate      — navigate a Chrome tab to a URL (CDP)
+  POST /v1/browser/js            — evaluate JavaScript in a Chrome tab (CDP)
+  GET  /v1/browser/screenshot    — PNG screenshot of a specific tab (CDP)
+  GET  /v1/browser/page_text     — visible text of a Chrome tab (CDP)
+  GET  /v1/stream/camera         — MJPEG live stream from the default camera (HTTP only)
+  GET  /v1/stream/tab            — MJPEG live stream of a Chrome tab via CDP (HTTP only)
+  GET  /v1/hotkey/status         — global hotkey listener state (enabled, combo, webhook URL)
 
 Auth: every endpoint requires header ``X-Desktop-Token: <secret>``
 matching ``DESKTOP_TOKEN``.  Without it the daemon answers 401.
@@ -74,18 +83,21 @@ import json
 import logging
 import os
 import platform
+import queue
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 import httpx  # noqa: F401  — imported so wheel resolves; future probes may use it
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 logging.basicConfig(
@@ -138,6 +150,65 @@ _AUDIT_LOG = Path(
 _AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
 
 
+# ─── Chrome DevTools Protocol (CDP) state ──────────────────────────────
+#
+# CDP gives us a cross-platform handle on any Chrome/Chromium tab via
+# the built-in debug protocol.  Chrome must be started with
+#   --remote-debugging-port=<port>
+# (default 9222, overridable via CHROME_DEBUG_PORT env).  The daemon
+# probes at startup and every CDP_PROBE_TTL seconds; _cdp_reachable is
+# the cached result that capabilities() returns to the orchestrator.
+#
+# Using websockets for CDP WS calls — it's already a transitive dep via
+# uvicorn[standard], so no extra requirement is needed.
+
+_CDP_PORT: int = int(os.environ.get("CHROME_DEBUG_PORT", "9222"))
+_CDP_BASE: str = f"http://127.0.0.1:{_CDP_PORT}"
+_CDP_PROBE_TTL: float = 30.0  # seconds between background re-probes
+
+# Module-level bool updated by _cdp_probe().  Backends read this in
+# capabilities() — safe because asyncio is single-threaded and bool
+# reads are atomic under CPython's GIL.
+_cdp_reachable: bool = False
+_cdp_last_probe: float = 0.0          # monotonic timestamp
+_CDP_POLL_TASK: asyncio.Task | None = None  # background re-probe loop
+
+
+# ─── Global hotkey (#41 — Osaurus pattern) ─────────────────────────────
+#
+# A global keyboard shortcut lets the user trigger voice dictation from
+# any application — no browser focus needed.  When the hotkey fires the
+# agent POSTs to the orchestrator's /api/hotkey/ptt endpoint, which
+# broadcasts a ``ptt_trigger`` event to all active browser sessions.
+# The browser handles the toggle: first trigger = start PTT; second
+# trigger (or 10 s timeout) = release PTT.
+#
+# pynput is a daemon thread — it runs in the background and doesn't
+# block the asyncio event loop.  The HTTP call in the callback is
+# intentionally synchronous (blocks only that thread, not the loop).
+
+# Default combo: Ctrl+Shift+Space on all platforms.
+# macOS users often prefer Cmd+Shift+Space; override via HOTKEY_COMBO.
+_HOTKEY_COMBO: str = os.environ.get("HOTKEY_COMBO", "<ctrl>+<shift>+space")
+
+# URL of the orchestrator's webhook.  In the typical single-machine
+# setup (agent and orchestrator on the same host) this is localhost:8080.
+_HOTKEY_WEBHOOK_URL: str = os.environ.get(
+    "ORCHESTRATOR_WEBHOOK_URL", "http://localhost:8080"
+).rstrip("/")
+
+# Set to "0" / "false" / "no" to disable the global hotkey listener
+# entirely (e.g. when running the agent headless on a server that has
+# no keyboard access permissions).
+_HOTKEY_ENABLED: bool = os.environ.get("HOTKEY_ENABLED", "1").lower() not in (
+    "0", "false", "no", "off",
+)
+
+# Runtime state — set during startup.
+_HOTKEY_ACTIVE: bool = False  # True once the listener started successfully
+_HOTKEY_LISTENER = None       # pynput.keyboard.GlobalHotKeys instance
+
+
 def _audit(event: str, **fields: Any) -> None:
     """Append one structured event line to the audit log."""
     record = {"ts": time.time(), "event": event, **fields}
@@ -146,6 +217,92 @@ def _audit(event: str, **fields: Any) -> None:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError:
         log.warning("audit: failed to write event=%s", event)
+
+
+# ─── Global hotkey helpers ─────────────────────────────────────────────
+
+
+# Debounce window: ignore hotkey re-fires within this many seconds.  A
+# global dictation key is easy to double-tap; without this, two presses
+# 100 ms apart would toggle PTT on then off again.  Also bounds how often
+# we spawn a webhook thread.
+_HOTKEY_DEBOUNCE_S = 0.5
+_hotkey_last_fired = 0.0
+
+
+def _post_hotkey_webhook() -> None:
+    """Blocking webhook POST — runs on its own short-lived thread."""
+    url = _HOTKEY_WEBHOOK_URL + "/api/hotkey/ptt"
+    try:
+        import httpx as _hx
+        _hx.post(url, headers={"X-Desktop-Token": SHARED_TOKEN}, timeout=2.0)
+        log.info("hotkey: PTT trigger sent to %s", url)
+    except Exception as exc:
+        log.warning("hotkey: failed to reach orchestrator at %s: %s", url, exc)
+
+
+def _hotkey_fire() -> None:
+    """Called by pynput (ON its listener thread) when the hotkey fires.
+
+    Must return immediately: pynput processes keystrokes on this same
+    thread, so a blocking 2 s HTTP POST here would freeze key handling.
+    We debounce, then hand the POST to a short-lived daemon thread.
+    """
+    global _hotkey_last_fired
+    now = time.monotonic()
+    if now - _hotkey_last_fired < _HOTKEY_DEBOUNCE_S:
+        return  # ignore rapid re-fire / key-repeat
+    _hotkey_last_fired = now
+    _audit("hotkey_fired", combo=_HOTKEY_COMBO)
+    threading.Thread(
+        target=_post_hotkey_webhook, name="va-hotkey-webhook", daemon=True
+    ).start()
+
+
+def _start_hotkey_listener() -> None:
+    """Attempt to start the pynput GlobalHotKeys listener.
+
+    Runs as a daemon thread — stops automatically when the process exits.
+    Sets ``_HOTKEY_ACTIVE`` on success.  On platforms where pynput is
+    unavailable or the Accessibility permission is missing, logs a warning
+    and leaves ``_HOTKEY_ACTIVE = False`` so capabilities() reports the
+    feature as absent.
+    """
+    global _HOTKEY_ACTIVE, _HOTKEY_LISTENER
+
+    if not _HOTKEY_ENABLED:
+        log.info("hotkey: disabled via HOTKEY_ENABLED=0")
+        return
+    try:
+        from pynput import keyboard as _kb
+
+        _HOTKEY_LISTENER = _kb.GlobalHotKeys({_HOTKEY_COMBO: _hotkey_fire})
+        _HOTKEY_LISTENER.start()
+        _HOTKEY_ACTIVE = True
+        log.info(
+            "hotkey: listener started — combo=%s webhook=%s",
+            _HOTKEY_COMBO, _HOTKEY_WEBHOOK_URL,
+        )
+    except ImportError:
+        log.warning("hotkey: pynput not installed — global hotkey unavailable")
+    except Exception as exc:
+        log.warning(
+            "hotkey: failed to start listener (missing Accessibility permission?): %s",
+            exc,
+        )
+
+
+def _stop_hotkey_listener() -> None:
+    """Gracefully stop the pynput listener (called from shutdown)."""
+    global _HOTKEY_ACTIVE, _HOTKEY_LISTENER
+    listener = _HOTKEY_LISTENER
+    _HOTKEY_LISTENER = None
+    _HOTKEY_ACTIVE = False
+    if listener is not None:
+        try:
+            listener.stop()
+        except Exception:
+            pass
 
 
 # ─── Backend abstraction ───────────────────────────────────────────────
@@ -177,6 +334,16 @@ class Backend(ABC):
 
     async def screenshot(self) -> bytes:
         raise NotImplementedError("screenshot not supported on this platform")
+
+    async def camera_capture(self) -> bytes:
+        """Capture one JPEG frame from the default camera device.
+
+        Returns raw JPEG bytes.  Raises ``NotImplementedError`` when
+        OpenCV isn't installed or no camera device is found.  Raises
+        ``RuntimeError`` on a transient capture failure so the HTTP
+        layer can distinguish a permanent 503 from a one-off 500.
+        """
+        raise NotImplementedError("camera not available on this platform")
 
     async def applescript(self, script: str, timeout: float) -> dict:
         raise NotImplementedError("applescript not supported on this platform")
@@ -253,6 +420,22 @@ def _pyautogui_do(pyautogui_mod, action: str, **kwargs: Any) -> None:
         raise ValueError(f"unknown action: {action!r}")
 
 
+def _import_cv2_safely() -> Any | None:
+    """Return the cv2 (OpenCV) module or ``None`` if not installed.
+
+    opencv-python-headless is listed in pyproject.toml; this wrapper
+    keeps the agent startable on hosts where the install failed (e.g.
+    stripped containers).  The camera capability is simply reported as
+    False in that case.
+    """
+    try:
+        import cv2  # noqa: F401
+        return cv2
+    except ImportError as exc:
+        log.info("cv2 unavailable — camera capture disabled: %s", exc)
+        return None
+
+
 def _import_pyautogui_safely() -> Any | None:
     """Return the pyautogui module or ``None`` if it can't be loaded.
 
@@ -265,7 +448,7 @@ def _import_pyautogui_safely() -> Any | None:
     try:
         import pyautogui  # noqa: F401
         return pyautogui
-    except (ImportError, Exception) as exc:  # noqa: BLE001 — pyautogui raises bare Exception on display failure
+    except Exception as exc:  # noqa: BLE001 — pyautogui raises bare Exception on display failure (ImportError ⊂ Exception)
         log.warning("pyautogui unavailable: %s", exc)
         return None
 
@@ -317,6 +500,170 @@ def _read_cursor_activity() -> dict | None:
     return {"x": _CURSOR_LAST_POS[0], "y": _CURSOR_LAST_POS[1], "idle_s": idle_s}
 
 
+# ─── CDP helpers ───────────────────────────────────────────────────────
+
+
+async def _cdp_probe() -> bool:
+    """GET /json/version — update _cdp_reachable, return new value.
+
+    Fast (2 s timeout).  Called once at startup and then every
+    _CDP_PROBE_TTL seconds by the background poll task.  The
+    orchestrator's 30 s health-poll cadence means a Chrome that
+    comes online mid-session is detected within one poll cycle.
+    """
+    global _cdp_reachable, _cdp_last_probe
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as c:
+            r = await c.get(f"{_CDP_BASE}/json/version")
+        ok = r.status_code == 200
+    except Exception:
+        ok = False
+    _cdp_reachable = ok
+    _cdp_last_probe = time.monotonic()
+    if ok:
+        log.debug("CDP: Chrome reachable on port %d", _CDP_PORT)
+    return ok
+
+
+async def _cdp_ensure_reachable() -> None:
+    """Re-probe if the last probe is stale; raise HTTP 503 if not reachable.
+
+    Used at the top of every browser/* route so Chrome coming online
+    after startup is detected within one _CDP_PROBE_TTL window rather
+    than requiring an agent restart.
+    """
+    if time.monotonic() - _cdp_last_probe > _CDP_PROBE_TTL:
+        await _cdp_probe()
+    if not _cdp_reachable:
+        raise HTTPException(
+            503,
+            f"Chrome not reachable on port {_CDP_PORT}. "
+            f"Start Chrome with --remote-debugging-port={_CDP_PORT}",
+        )
+
+
+async def _cdp_list_tabs() -> list[dict]:
+    """GET /json/list → filtered list of page-type tabs with WS URLs.
+
+    Returns only tabs of type "page" (not extension popups, service
+    workers, etc.) that have an active WebSocket debugger URL.  Non-page
+    tabs can't be driven by Page.navigate / Runtime.evaluate.
+    """
+    async with httpx.AsyncClient(timeout=5.0) as c:
+        r = await c.get(f"{_CDP_BASE}/json/list")
+        r.raise_for_status()
+    return [
+        {
+            "id": t["id"],
+            "title": t.get("title") or "",
+            "url": t.get("url") or "",
+            "type": t.get("type") or "page",
+            "ws_url": t.get("webSocketDebuggerUrl") or "",
+        }
+        for t in r.json()
+        if t.get("type") == "page" and t.get("webSocketDebuggerUrl")
+    ]
+
+
+async def _cdp_ws_call(
+    ws_url: str,
+    method: str,
+    params: dict,
+    *,
+    timeout: float = 10.0,
+) -> dict:
+    """Open a CDP WebSocket, send one JSON-RPC command, await the response, close.
+
+    Each call opens a fresh connection — no persistent WS state to
+    manage.  Chrome tolerates concurrent per-tab connections; the ~5 ms
+    overhead is negligible for voice-assistant cadence.
+
+    CDP events (frames without an ``id``) are discarded while we wait
+    for the matching response — this keeps the loop simple and correct.
+    """
+    import websockets as _ws
+
+    msg_id = 1
+    payload = json.dumps({"id": msg_id, "method": method, "params": params})
+    deadline = time.monotonic() + timeout
+
+    async with _ws.connect(
+        ws_url, max_size=32 * 1024 * 1024, close_timeout=2.0,
+    ) as ws:
+        await ws.send(payload)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"CDP {method!r} timed out after {timeout:.0f} s")
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            msg = json.loads(raw)
+            if msg.get("id") == msg_id:
+                if "error" in msg:
+                    err = msg["error"]
+                    raise RuntimeError(
+                        f"CDP error {err.get('code', '?')}: {err.get('message', '?')}"
+                    )
+                return msg.get("result") or {}
+            # Discard CDP event frames (no id) while waiting for the response.
+
+
+# Only http/https may be navigated to via CDP.  Blocking other schemes
+# stops the browser-control surface from being turned into a local-file
+# reader (``file:///etc/passwd`` → screenshot/page_text exfiltration),
+# a JS-eval vector (``javascript:``), an internal-page opener
+# (``chrome://``, ``devtools://``, ``view-source:``), or a data-URI
+# injector.  The token already gates the endpoint; this bounds what a
+# token holder (or a buggy orchestrator tool) can point the browser at.
+_ALLOWED_NAV_SCHEMES = frozenset({"http", "https"})
+
+
+def _require_web_url(url: str) -> str:
+    """Validate ``url`` is a plain http(s) URL; raise HTTP 400 otherwise.
+
+    Returns the URL unchanged on success so call sites can inline it.
+    """
+    scheme = urlsplit(url).scheme.lower()
+    if scheme not in _ALLOWED_NAV_SCHEMES:
+        raise HTTPException(
+            400,
+            f"refusing to navigate to non-web scheme {scheme or '(none)'!r}; "
+            "only http/https are allowed",
+        )
+    return url
+
+
+async def _cdp_resolve_tab(tab_id: str | None) -> dict:
+    """Return the tab dict for the given id, or the first page tab if None.
+
+    Raises HTTP 404 when the tab_id doesn't match any open tab, or
+    when there are no open page tabs at all.
+    """
+    tabs = await _cdp_list_tabs()
+    if tab_id:
+        for t in tabs:
+            if t["id"] == tab_id:
+                return t
+        raise HTTPException(404, f"no Chrome tab with id {tab_id!r}")
+    if not tabs:
+        raise HTTPException(404, "no open Chrome page tabs found")
+    return tabs[0]
+
+
+async def _cdp_poll_loop() -> None:
+    """Background task: re-probe Chrome every _CDP_PROBE_TTL seconds.
+
+    Keeps _cdp_reachable fresh so the orchestrator's next health-poll
+    sees the correct browser_cdp capability flag without the agent
+    requiring a restart when Chrome opens or closes.
+    """
+    while True:
+        await asyncio.sleep(_CDP_PROBE_TTL)
+        try:
+            await _cdp_probe()
+        except Exception:
+            log.debug("CDP poll: probe failed", exc_info=True)
+
+
 # ─── MacOSBackend ──────────────────────────────────────────────────────
 
 
@@ -363,6 +710,7 @@ class MacOSBackend(Backend):
         self._has_applescript = self._probe_applescript()
         self._pyautogui = _import_pyautogui_safely()
         self._has_pyautogui = self._pyautogui is not None
+        self._cv2 = _import_cv2_safely()
         # Default-app resolver cache: category → (resolved_at, payload).
         # 5 min TTL matches the docstring on resolve_default_app(); the
         # operator changing their default-mail-app should see the change
@@ -388,6 +736,13 @@ class MacOSBackend(Backend):
             "hotkey": self._has_pyautogui,
             "default_apps_resolver": self._has_applescript,
             "cursor_activity": self._has_pyautogui,
+            "camera": self._cv2 is not None,
+            # browser_cdp is cross-platform (Chrome debug protocol).
+            # _cdp_reachable is updated by the background probe task.
+            "browser_cdp": _cdp_reachable,
+            # global_hotkey is cross-platform (pynput).
+            # _HOTKEY_ACTIVE is set when the listener started cleanly.
+            "global_hotkey": _HOTKEY_ACTIVE,
         }
 
     # ── automation ───────────────────────────────────────────────────
@@ -402,6 +757,35 @@ class MacOSBackend(Backend):
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             return buf.getvalue()
+
+        return await asyncio.to_thread(_do)
+
+    async def camera_capture(self) -> bytes:
+        if self._cv2 is None:
+            raise NotImplementedError("opencv not installed")
+        cv2 = self._cv2
+
+        def _do() -> bytes:
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                cap.release()
+                raise RuntimeError("no camera device accessible")
+            try:
+                # Warm up auto-exposure: discard the first few frames
+                # (camera sensors start dark on cold open).
+                for _ in range(3):
+                    cap.read()
+                ret, frame = cap.read()
+            finally:
+                cap.release()
+            if not ret or frame is None:
+                raise RuntimeError("camera read returned empty frame")
+            ok, buf = cv2.imencode(
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90]
+            )
+            if not ok:
+                raise RuntimeError("JPEG encoding of camera frame failed")
+            return bytes(buf)
 
         return await asyncio.to_thread(_do)
 
@@ -589,6 +973,7 @@ class WindowsBackend(Backend):
     def __init__(self) -> None:
         self._pyautogui = _import_pyautogui_safely()
         self._has_pyautogui = self._pyautogui is not None
+        self._cv2 = _import_cv2_safely()
         try:
             import pywinauto  # noqa: F401
             self._has_pywinauto = True
@@ -604,6 +989,10 @@ class WindowsBackend(Backend):
             # TODO: winreg UserChoice → default app per category.  Stub for now.
             "default_apps_resolver": False,
             "cursor_activity": self._has_pyautogui,
+            "camera": self._cv2 is not None,
+            "browser_cdp": _cdp_reachable,
+            # global_hotkey is cross-platform (pynput runs on all OSes).
+            "global_hotkey": _HOTKEY_ACTIVE,
         }
 
     async def screenshot(self) -> bytes:
@@ -616,6 +1005,33 @@ class WindowsBackend(Backend):
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             return buf.getvalue()
+
+        return await asyncio.to_thread(_do)
+
+    async def camera_capture(self) -> bytes:
+        if self._cv2 is None:
+            raise NotImplementedError("opencv not installed")
+        cv2 = self._cv2
+
+        def _do() -> bytes:
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                cap.release()
+                raise RuntimeError("no camera device accessible")
+            try:
+                for _ in range(3):
+                    cap.read()
+                ret, frame = cap.read()
+            finally:
+                cap.release()
+            if not ret or frame is None:
+                raise RuntimeError("camera read returned empty frame")
+            ok, buf = cv2.imencode(
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90]
+            )
+            if not ok:
+                raise RuntimeError("JPEG encoding of camera frame failed")
+            return bytes(buf)
 
         return await asyncio.to_thread(_do)
 
@@ -673,6 +1089,7 @@ class LinuxBackend(Backend):
     def __init__(self) -> None:
         self._pyautogui = _import_pyautogui_safely()
         self._has_pyautogui = self._pyautogui is not None
+        self._cv2 = _import_cv2_safely()
         try:
             r = subprocess.run(
                 ["xdotool", "--version"], capture_output=True, timeout=2,
@@ -690,6 +1107,10 @@ class LinuxBackend(Backend):
             # TODO: xdg-mime query default x-scheme-handler/mailto → desktop file.
             "default_apps_resolver": False,
             "cursor_activity": self._has_pyautogui,
+            "camera": self._cv2 is not None,
+            "browser_cdp": _cdp_reachable,
+            # global_hotkey is cross-platform (pynput runs on all OSes).
+            "global_hotkey": _HOTKEY_ACTIVE,
         }
 
     async def screenshot(self) -> bytes:
@@ -702,6 +1123,33 @@ class LinuxBackend(Backend):
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             return buf.getvalue()
+
+        return await asyncio.to_thread(_do)
+
+    async def camera_capture(self) -> bytes:
+        if self._cv2 is None:
+            raise NotImplementedError("opencv not installed")
+        cv2 = self._cv2
+
+        def _do() -> bytes:
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                cap.release()
+                raise RuntimeError("no camera device accessible")
+            try:
+                for _ in range(3):
+                    cap.read()
+                ret, frame = cap.read()
+            finally:
+                cap.release()
+            if not ret or frame is None:
+                raise RuntimeError("camera read returned empty frame")
+            ok, buf = cv2.imencode(
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90]
+            )
+            if not ok:
+                raise RuntimeError("JPEG encoding of camera frame failed")
+            return bytes(buf)
 
         return await asyncio.to_thread(_do)
 
@@ -792,46 +1240,95 @@ class AuditRequest(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+class BrowserNavigateRequest(BaseModel):
+    """Navigate an existing Chrome tab to a URL, or open a new tab.
+
+    ``tab_id`` — omit to open a new tab.  The orchestrator gets the
+    resolved ``tab_id`` back so it can anchor follow-up calls.
+    """
+
+    url: str
+    tab_id: str | None = None
+
+
+class BrowserJsRequest(BaseModel):
+    """Evaluate JavaScript in a Chrome tab.
+
+    ``code`` — the JS expression to run (Runtime.evaluate).
+    ``tab_id`` — omit to target the first page tab.
+    ``timeout`` — CDP WS call timeout in seconds.
+    ``return_by_value`` — when True the result is JSON-serialised; when
+        False the result is a remote object reference (advanced use).
+    """
+
+    code: str
+    tab_id: str | None = None
+    timeout: float = 10.0
+    return_by_value: bool = True
+
+
 # ─── App ───────────────────────────────────────────────────────────────
 
 
-_VERSION = "1.2.0"
+_VERSION = "1.5.0"
 app = FastAPI(title="desktop-agent", version=_VERSION)
 
 
 @app.on_event("startup")
 async def startup() -> None:
-    """Log readiness and spin up the cursor-activity poll task.
+    """Log readiness; spin up cursor-activity and CDP background poll tasks.
 
-    Without the poll the /v1/cursor_activity endpoint would have no
-    data to report; with it, every poll tick (10 Hz) updates the
-    module-level snapshot the endpoint reads.
+    CDP probe runs first so capabilities() in the log line already shows
+    the correct browser_cdp value; subsequent probes run every
+    _CDP_PROBE_TTL seconds so Chrome coming online after startup is
+    detected within one poll cycle.
     """
-    global _CURSOR_TASK
+    global _CURSOR_TASK, _CDP_POLL_TASK
+
+    # Probe Chrome before reading capabilities so the log shows the
+    # real browser_cdp value rather than the uninitialised False.
+    await _cdp_probe()
+
     caps = _BACKEND.capabilities()
     log.info(
-        "desktop-agent ready: id=%s platform=%s version=%s caps=%s",
-        _AGENT_ID, _BACKEND.name, _VERSION,
+        "desktop-agent ready: id=%s platform=%s version=%s cdp_port=%d caps=%s",
+        _AGENT_ID, _BACKEND.name, _VERSION, _CDP_PORT,
         ",".join(k for k, v in caps.items() if v) or "<none>",
     )
-    # Start the cursor poll task IFF the backend has pyautogui — without
-    # it the position() call below would crash.  Track the handle so
-    # shutdown can cancel cleanly under uvicorn.
+
+    # Cursor-activity poll — only when pyautogui is available.
     pg = getattr(_BACKEND, "_pyautogui", None)
     if pg is not None and (_CURSOR_TASK is None or _CURSOR_TASK.done()):
         _CURSOR_TASK = asyncio.create_task(_cursor_poll_loop(pg))
 
+    # CDP re-probe loop — keeps browser_cdp capability fresh.
+    if _CDP_POLL_TASK is None or _CDP_POLL_TASK.done():
+        _CDP_POLL_TASK = asyncio.create_task(_cdp_poll_loop())
+
+    # Global hotkey listener — starts a daemon thread (not asyncio).
+    # Must run after the event loop is up so pynput's internal asyncio
+    # hooks (macOS) initialise against the running loop.
+    _start_hotkey_listener()
+
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    global _CURSOR_TASK
-    if _CURSOR_TASK is not None and not _CURSOR_TASK.done():
-        _CURSOR_TASK.cancel()
-        try:
-            await _CURSOR_TASK
-        except (asyncio.CancelledError, Exception):
-            pass
+    global _CURSOR_TASK, _CDP_POLL_TASK
+
+    async def _cancel(task: asyncio.Task | None) -> None:
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    await _cancel(_CURSOR_TASK)
     _CURSOR_TASK = None
+    await _cancel(_CDP_POLL_TASK)
+    _CDP_POLL_TASK = None
+    # Stop the pynput listener thread.
+    _stop_hotkey_listener()
 
 
 def _check_auth(token: str | None) -> None:
@@ -862,14 +1359,18 @@ async def health() -> dict:
     New orchestrator code should prefer /v1/capabilities; this endpoint
     answers without auth so a friend in the same shell can `curl` and
     see the daemon is up.
+
+    Deliberately omits ``agent_id`` (hostname) and ``audit_log`` (an
+    absolute filesystem path that leaks the home dir / username) — those
+    are recon fodder on a remote (0.0.0.0) deployment.  The full detail
+    is available at the auth-gated /v1/capabilities.  The boolean
+    ``engines`` map is retained for pre-1.1 orchestrator compatibility.
     """
     caps = _BACKEND.capabilities()
     return {
         "ok": True,
-        "agent_id": _AGENT_ID,
         "platform": _BACKEND.name,
         "version": _VERSION,
-        "capabilities": caps,
         # Legacy keys — orchestrator's pre-1.1 code reads these.
         "engines": {
             "applescript": caps.get("applescript", False),
@@ -877,7 +1378,6 @@ async def health() -> dict:
             "xdotool": getattr(_BACKEND, "_has_xdotool", False),
             "pywinauto": getattr(_BACKEND, "_has_pywinauto", False),
         },
-        "audit_log": str(_AUDIT_LOG),
     }
 
 
@@ -1053,6 +1553,439 @@ async def take_screenshot(
     return Response(content=png, media_type="image/png")
 
 
+@app.get("/v1/camera")
+async def take_camera_frame(
+    x_desktop_token: str | None = Header(default=None),
+) -> Response:
+    """Capture a single JPEG frame from the default camera device.
+
+    Used by the orchestrator's ``look_at_camera`` tool for utterances
+    like "посмотри камерой" / "look through the camera".  Returns the
+    raw JPEG so the orchestrator can pass it directly to the vision LLM.
+
+    503 — opencv not installed or no camera permission/device.
+    500 — transient capture failure (camera busy, driver error).
+    """
+    _check_auth(x_desktop_token)
+    _capability_or_503("camera")
+    t0 = time.monotonic()
+    try:
+        jpg = await _BACKEND.camera_capture()
+    except NotImplementedError as exc:
+        raise HTTPException(503, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc))
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    _audit("camera_capture", bytes=len(jpg), elapsed_ms=elapsed_ms)
+    return Response(content=jpg, media_type="image/jpeg")
+
+
+# ─── Browser (Chrome DevTools Protocol) ─────────────────────────────────
+#
+# All routes require Chrome running with --remote-debugging-port=<CDP_PORT>
+# (default 9222 / CHROME_DEBUG_PORT env).  Each call opens a fresh CDP
+# WebSocket connection for simplicity — the sub-millisecond overhead is
+# fine at voice-assistant cadence.
+#
+# Route architecture mirrors the existing capability gates: every route
+# calls _cdp_ensure_reachable() which does an inline re-probe if the
+# last probe is stale (_CDP_PROBE_TTL), then raises 503 if Chrome isn't
+# up.  This means Chrome coming online after startup is detected within
+# one _CDP_PROBE_TTL window without a daemon restart.
+
+
+@app.get("/v1/browser/tabs")
+async def browser_list_tabs(
+    x_desktop_token: str | None = Header(default=None),
+) -> dict:
+    """List open Chrome page tabs.
+
+    Returns only "page"-type tabs that have an active WS debugger URL —
+    extension popups and service workers are excluded.  Use tab ``id``
+    from the response to anchor navigate / js / screenshot calls to a
+    specific tab.
+    """
+    _check_auth(x_desktop_token)
+    await _cdp_ensure_reachable()
+    tabs = await _cdp_list_tabs()
+    _audit("browser_tabs", count=len(tabs))
+    return {"tabs": tabs}
+
+
+@app.post("/v1/browser/navigate")
+async def browser_navigate(
+    req: BrowserNavigateRequest,
+    x_desktop_token: str | None = Header(default=None),
+) -> dict:
+    """Navigate a Chrome tab to a URL.
+
+    ``tab_id`` present → navigate that tab in-place via Page.navigate.
+    ``tab_id`` absent  → open a new tab via Chrome's /json/new endpoint.
+    Returns the resolved ``tab_id`` so the caller can chain follow-up
+    calls without re-listing tabs.
+    """
+    _check_auth(x_desktop_token)
+    # Only http/https — never file://, chrome://, javascript:, data:, etc.
+    _require_web_url(req.url)
+    await _cdp_ensure_reachable()
+
+    if req.tab_id:
+        tab = await _cdp_resolve_tab(req.tab_id)
+        result = await _cdp_ws_call(
+            tab["ws_url"], "Page.navigate", {"url": req.url}, timeout=15.0,
+        )
+        _audit("browser_navigate", url=req.url, tab_id=tab["id"])
+        return {
+            "ok": True,
+            "tab_id": tab["id"],
+            "url": result.get("url") or req.url,
+            "frame_id": result.get("frameId"),
+        }
+
+    # New tab: Chrome's HTTP endpoint creates the tab and starts loading.
+    # The WS debugger URL isn't immediately available — we return the
+    # tab_id immediately; the tab appears in /browser/tabs within ~500 ms.
+    # Percent-encode the URL so it can't inject extra query params into
+    # Chrome's /json/new endpoint (e.g. an embedded '&').
+    async with httpx.AsyncClient(timeout=5.0) as c:
+        r = await c.get(f"{_CDP_BASE}/json/new?{quote(req.url, safe='')}")
+        r.raise_for_status()
+        new_info = r.json()
+    tab_id = new_info.get("id", "")
+    _audit("browser_navigate", url=req.url, tab_id=tab_id, action="new_tab")
+    return {"ok": True, "tab_id": tab_id, "url": req.url}
+
+
+@app.post("/v1/browser/js")
+async def browser_execute_js(
+    req: BrowserJsRequest,
+    x_desktop_token: str | None = Header(default=None),
+) -> dict:
+    """Evaluate JavaScript in a Chrome tab and return the result.
+
+    Uses CDP Runtime.evaluate — the expression runs in the tab's main
+    frame.  The daemon does NOT restrict what code runs; that policy
+    lives in the orchestrator's ``run_browser_js`` tool (risk=high_write).
+    Trusted-client gateway: the DESKTOP_TOKEN is the only gate here.
+    """
+    _check_auth(x_desktop_token)
+    await _cdp_ensure_reachable()
+    tab = await _cdp_resolve_tab(req.tab_id)
+    result = await _cdp_ws_call(
+        tab["ws_url"],
+        "Runtime.evaluate",
+        {"expression": req.code, "returnByValue": req.return_by_value},
+        timeout=req.timeout,
+    )
+    _audit("browser_js", code=req.code[:200], tab_id=tab["id"])
+    rv = result.get("result") or {}
+    return {
+        "ok": True,
+        "tab_id": tab["id"],
+        "type": rv.get("type"),
+        "value": rv.get("value"),
+        "description": rv.get("description"),
+    }
+
+
+@app.get("/v1/browser/screenshot")
+async def browser_tab_screenshot(
+    tab_id: str | None = None,
+    x_desktop_token: str | None = Header(default=None),
+) -> Response:
+    """PNG screenshot of a specific Chrome tab (not the full screen).
+
+    Uses CDP Page.captureScreenshot so the captured area is exactly the
+    tab's viewport — no chrome / taskbar / other windows included.
+    Useful for feeding a specific page to the vision LLM without
+    capturing the whole desktop.
+    """
+    _check_auth(x_desktop_token)
+    await _cdp_ensure_reachable()
+    tab = await _cdp_resolve_tab(tab_id)
+    result = await _cdp_ws_call(
+        tab["ws_url"],
+        "Page.captureScreenshot",
+        {"format": "png", "fromSurface": True},
+        timeout=15.0,
+    )
+    png_b64 = result.get("data") or ""
+    if not png_b64:
+        raise HTTPException(500, "CDP returned empty screenshot data")
+    png = base64.b64decode(png_b64)
+    _audit("browser_screenshot", tab_id=tab["id"], bytes=len(png))
+    return Response(content=png, media_type="image/png")
+
+
+@app.get("/v1/browser/page_text")
+async def browser_page_text(
+    tab_id: str | None = None,
+    x_desktop_token: str | None = Header(default=None),
+) -> dict:
+    """Extract the visible text of a Chrome tab.
+
+    Runs ``document.body.innerText`` (falls back to ``textContent``)
+    in the tab via Runtime.evaluate.  The orchestrator's
+    ``read_browser_tab`` tool passes this to the LLM to answer
+    user questions about the current page.
+    """
+    _check_auth(x_desktop_token)
+    await _cdp_ensure_reachable()
+    tab = await _cdp_resolve_tab(tab_id)
+    result = await _cdp_ws_call(
+        tab["ws_url"],
+        "Runtime.evaluate",
+        {
+            "expression": (
+                "(function(){"
+                "  var b = document.body;"
+                "  return b ? (b.innerText || b.textContent || '') : '';"
+                "})()"
+            ),
+            "returnByValue": True,
+        },
+        timeout=10.0,
+    )
+    rv = result.get("result") or {}
+    text = rv.get("value") or ""
+    _audit("browser_page_text", tab_id=tab["id"], chars=len(text))
+    return {
+        "text": text,
+        "url": tab["url"],
+        "title": tab["title"],
+        "tab_id": tab["id"],
+    }
+
+
+# ─── Global hotkey status ──────────────────────────────────────────────
+
+
+@app.get("/v1/hotkey/status")
+async def hotkey_status(
+    x_desktop_token: str | None = Header(default=None),
+) -> dict:
+    """Return the current state of the global hotkey listener.
+
+    ``enabled``       — True when the listener started successfully.
+    ``combo``         — The configured hotkey combination string.
+    ``webhook_url``   — Orchestrator webhook the hotkey POSTs to.
+
+    Useful for operator diagnostics: if ``enabled`` is False, check
+    that pynput is installed (``uv sync`` in the desktop-agent dir)
+    and that the terminal has Accessibility permission on macOS.
+    """
+    _check_auth(x_desktop_token)
+    return {
+        "enabled": _HOTKEY_ACTIVE,
+        "combo": _HOTKEY_COMBO,
+        "webhook_url": _HOTKEY_WEBHOOK_URL,
+    }
+
+
+# ─── MJPEG live streaming ──────────────────────────────────────────────
+#
+# Each endpoint yields a ``multipart/x-mixed-replace`` stream of JPEG
+# frames, which browsers render directly in an ``<img>`` tag — no JS
+# needed on the client side.
+#
+# HTTP-only (not implemented in ``_reverse_dispatch``).  The orchestrator
+# proxies these through ``/api/stream/{source}`` so family devices only
+# need the ``va_session`` cookie, not the DESKTOP_TOKEN.
+
+_STREAM_BOUNDARY = "va_frame"
+
+# Maximum FPS the caller may request for each source.
+# Camera goes up to 30 fps; CDP tab screenshots are heavier and capped
+# at 15 fps to keep the event loop free.
+_CAMERA_MAX_FPS: float = 30.0
+_TAB_MAX_FPS: float = 15.0
+
+
+async def _mjpeg_frame(jpg: bytes) -> bytes:
+    """Wrap a JPEG image in a MJPEG multipart frame."""
+    header = (
+        f"--{_STREAM_BOUNDARY}\r\n"
+        f"Content-Type: image/jpeg\r\n"
+        f"Content-Length: {len(jpg)}\r\n"
+        f"\r\n"
+    ).encode()
+    return header + jpg + b"\r\n"
+
+
+def _camera_grab_loop(
+    cv2: Any,
+    fps: float,
+    stop: "threading.Event",
+    frames: "queue.Queue",
+) -> None:
+    """Worker thread: own ONE ``VideoCapture`` for the stream's lifetime.
+
+    Opening/closing the device per frame (the old behaviour) re-triggered
+    the camera privacy LED + AVFoundation session negotiation 15–30×/sec,
+    which both thrashed the device and made the target fps unreachable.
+    Here the capture is opened once and released in ``finally`` when the
+    consumer signals ``stop`` (client disconnect).  Latest-frame-wins: a
+    bounded queue means a slow consumer drops stale frames rather than
+    lagging.  A ``None`` sentinel ends the consumer cleanly.
+    """
+    interval = 1.0 / fps
+    cap = cv2.VideoCapture(0)
+    try:
+        if not cap.isOpened():
+            frames.put(None)
+            return
+        while not stop.is_set():
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            enc_ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if enc_ok:
+                # Drop the previous frame if the consumer hasn't taken it,
+                # so we always hold only the freshest frame.
+                try:
+                    frames.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    frames.put_nowait(bytes(buf))
+                except queue.Full:
+                    pass
+            stop.wait(interval)
+    finally:
+        cap.release()
+        frames.put(None)  # sentinel: tell the consumer the stream ended
+
+
+async def _mjpeg_gen_camera(fps: float):
+    """Async generator — yields MJPEG parts from the host camera at ``fps``.
+
+    A worker thread owns the ``VideoCapture`` (opened once) and pushes
+    JPEG frames through a queue; the blocking grab/encode never touches
+    the event loop.  On client disconnect the generator is closed, the
+    ``finally`` sets ``stop``, and the worker releases the device exactly
+    once.
+    """
+    cv2 = getattr(_BACKEND, "_cv2", None)
+    if cv2 is None:
+        log.warning("stream/camera: opencv not available")
+        return
+    stop = threading.Event()
+    frames: "queue.Queue" = queue.Queue(maxsize=1)
+    worker = threading.Thread(
+        target=_camera_grab_loop,
+        args=(cv2, fps, stop, frames),
+        name="va-camera-stream",
+        daemon=True,
+    )
+    worker.start()
+    try:
+        while True:
+            jpg = await asyncio.to_thread(frames.get)
+            if jpg is None:  # camera open failed or stream ended
+                return
+            yield await _mjpeg_frame(jpg)
+    finally:
+        # Client disconnected (GeneratorExit) or stream ended: stop the
+        # worker and let it release the camera device.
+        stop.set()
+        try:
+            frames.get_nowait()  # unblock the worker if the queue is full
+        except queue.Empty:
+            pass
+        await asyncio.to_thread(worker.join, 2.0)
+
+
+async def _mjpeg_gen_tab(fps: float, tab_id: str | None):
+    """Async generator — yields MJPEG parts from a CDP tab at ``fps``.
+
+    Opens a fresh CDP WebSocket per frame (stateless, sub-ms overhead at
+    this frame rate).  Stops if the tab disappears or CDP becomes
+    unreachable.
+    """
+    interval = 1.0 / fps
+    try:
+        while True:
+            t0 = asyncio.get_event_loop().time()
+            try:
+                tab = await _cdp_resolve_tab(tab_id)
+                result = await _cdp_ws_call(
+                    tab["ws_url"],
+                    "Page.captureScreenshot",
+                    {"format": "jpeg", "quality": 70, "fromSurface": True},
+                )
+            except Exception as exc:
+                # Tab closed / CDP unreachable — end the stream cleanly.
+                log.warning("stream/tab: capture failed: %s", exc)
+                return
+            data_b64 = result.get("data") or ""
+            if data_b64:
+                jpg = base64.b64decode(data_b64)
+                yield await _mjpeg_frame(jpg)
+            elapsed = asyncio.get_event_loop().time() - t0
+            delay = interval - elapsed
+            if delay > 0:
+                await asyncio.sleep(delay)
+    finally:
+        # GeneratorExit on client disconnect lands here — nothing to
+        # release (each frame uses a short-lived CDP WS), but log the end
+        # for symmetry with the camera stream and future-proofing.
+        log.debug("stream/tab: generator closed")
+
+
+@app.get("/v1/stream/camera")
+async def stream_camera(
+    fps: float = 15.0,
+    x_desktop_token: str | None = Header(default=None),
+) -> StreamingResponse:
+    """MJPEG live stream from the default camera device.
+
+    ``fps`` — target frame rate (1–30; default 15).  Capped to
+    ``_CAMERA_MAX_FPS``.  The actual rate may be lower depending on
+    camera sensor speed and host load.
+
+    Returns a ``multipart/x-mixed-replace`` response — display directly
+    in an ``<img>`` tag or proxy through the orchestrator's
+    ``/api/stream/camera`` endpoint.
+
+    HTTP-only — not available in reverse-WSS mode.
+    """
+    _check_auth(x_desktop_token)
+    _capability_or_503("camera")
+    fps = max(1.0, min(float(fps), _CAMERA_MAX_FPS))
+    _audit("stream_camera_start", fps=fps)
+    return StreamingResponse(
+        _mjpeg_gen_camera(fps),
+        media_type=f"multipart/x-mixed-replace; boundary={_STREAM_BOUNDARY}",
+    )
+
+
+@app.get("/v1/stream/tab")
+async def stream_tab(
+    tab_id: str | None = None,
+    fps: float = 5.0,
+    x_desktop_token: str | None = Header(default=None),
+) -> StreamingResponse:
+    """MJPEG live stream of a Chrome tab via CDP.
+
+    ``tab_id`` — CDP page id.  Omit to use the first open page tab.
+    ``fps`` — target frame rate (1–15; default 5).  Capped to
+    ``_TAB_MAX_FPS``.
+
+    Requires Chrome running with ``--remote-debugging-port``.
+    HTTP-only — not available in reverse-WSS mode.
+    """
+    _check_auth(x_desktop_token)
+    await _cdp_ensure_reachable()
+    fps = max(1.0, min(float(fps), _TAB_MAX_FPS))
+    # Resolve the tab now so we can 404 early if tab_id is bogus.
+    tab = await _cdp_resolve_tab(tab_id)
+    _audit("stream_tab_start", tab_id=tab["id"], fps=fps)
+    return StreamingResponse(
+        _mjpeg_gen_tab(fps, tab["id"]),
+        media_type=f"multipart/x-mixed-replace; boundary={_STREAM_BOUNDARY}",
+    )
+
+
 # ─── Free-form audit endpoint ──────────────────────────────────────────
 
 
@@ -1203,6 +2136,13 @@ async def _reverse_dispatch(method: str, params: dict) -> dict:
         # WSS is text-only — base64 the PNG so the orchestrator can
         # round-trip it through json.loads/dumps.
         return {"png_b64": base64.b64encode(png).decode("ascii")}
+    if method == "camera":
+        _require("camera")
+        jpg = await _BACKEND.camera_capture()
+        _audit("camera_capture", bytes=len(jpg),
+               elapsed_ms=int((time.monotonic() - t0) * 1000), mode="reverse")
+        # Same base64 envelope as screenshot.
+        return {"jpg_b64": base64.b64encode(jpg).decode("ascii")}
     if method == "default_app":
         _require("default_apps_resolver")
         cat = params.get("category") or ""
@@ -1218,6 +2158,104 @@ async def _reverse_dispatch(method: str, params: dict) -> dict:
             "x": 0, "y": 0, "idle_s": 999.0, "warm": False,
         }
         return snap
+
+    # ── Browser (CDP) — cross-platform, no _require() guard needed ──────
+    # _cdp_ensure_reachable() raises HTTPException(503) when Chrome isn't
+    # up; the WSS recv loop catches all exceptions and maps them to
+    # {"ok": False, "error": <str>} responses, so HTTPException propagates
+    # correctly without any special handling here.
+
+    if method == "browser_tabs":
+        await _cdp_ensure_reachable()
+        tabs = await _cdp_list_tabs()
+        _audit("browser_tabs", count=len(tabs), mode="reverse")
+        return {"tabs": tabs}
+
+    if method == "browser_navigate":
+        await _cdp_ensure_reachable()
+        url = params.get("url") or ""
+        _require_web_url(url)  # http/https only — see _require_web_url
+        tab_id = params.get("tab_id")
+        if tab_id:
+            tab = await _cdp_resolve_tab(tab_id)
+            result = await _cdp_ws_call(
+                tab["ws_url"], "Page.navigate", {"url": url}, timeout=15.0,
+            )
+            _audit("browser_navigate", url=url, tab_id=tab["id"], mode="reverse")
+            return {
+                "ok": True, "tab_id": tab["id"],
+                "url": result.get("url") or url,
+                "frame_id": result.get("frameId"),
+            }
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{_CDP_BASE}/json/new?{quote(url, safe='')}")
+            r.raise_for_status()
+            new_info = r.json()
+        tab_id_new = new_info.get("id", "")
+        _audit("browser_navigate", url=url, tab_id=tab_id_new, action="new_tab", mode="reverse")
+        return {"ok": True, "tab_id": tab_id_new, "url": url}
+
+    if method == "browser_js":
+        await _cdp_ensure_reachable()
+        tab = await _cdp_resolve_tab(params.get("tab_id"))
+        code = params.get("code") or ""
+        result = await _cdp_ws_call(
+            tab["ws_url"],
+            "Runtime.evaluate",
+            {
+                "expression": code,
+                "returnByValue": bool(params.get("return_by_value", True)),
+            },
+            timeout=float(params.get("timeout") or 10.0),
+        )
+        _audit("browser_js", code=code[:200], tab_id=tab["id"], mode="reverse")
+        rv = result.get("result") or {}
+        return {
+            "ok": True, "tab_id": tab["id"],
+            "type": rv.get("type"),
+            "value": rv.get("value"),
+            "description": rv.get("description"),
+        }
+
+    if method == "browser_screenshot":
+        await _cdp_ensure_reachable()
+        tab = await _cdp_resolve_tab(params.get("tab_id"))
+        result = await _cdp_ws_call(
+            tab["ws_url"],
+            "Page.captureScreenshot",
+            {"format": "png", "fromSurface": True},
+            timeout=15.0,
+        )
+        png_b64 = result.get("data") or ""
+        if not png_b64:
+            raise RuntimeError("CDP returned empty screenshot data")
+        png = base64.b64decode(png_b64)
+        _audit("browser_screenshot", tab_id=tab["id"], bytes=len(png), mode="reverse")
+        # Same base64 envelope as screenshot / camera — orchestrator decodes it.
+        return {"png_b64": base64.b64encode(png).decode("ascii")}
+
+    if method == "browser_page_text":
+        await _cdp_ensure_reachable()
+        tab = await _cdp_resolve_tab(params.get("tab_id"))
+        result = await _cdp_ws_call(
+            tab["ws_url"],
+            "Runtime.evaluate",
+            {
+                "expression": (
+                    "(function(){"
+                    "  var b = document.body;"
+                    "  return b ? (b.innerText || b.textContent || '') : '';"
+                    "})()"
+                ),
+                "returnByValue": True,
+            },
+            timeout=10.0,
+        )
+        rv = result.get("result") or {}
+        text = rv.get("value") or ""
+        _audit("browser_page_text", tab_id=tab["id"], chars=len(text), mode="reverse")
+        return {"text": text, "url": tab["url"], "title": tab["title"], "tab_id": tab["id"]}
+
     raise RuntimeError(f"unknown method: {method!r}")
 
 

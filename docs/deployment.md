@@ -2,6 +2,30 @@
 
 End-to-end walkthrough, `git clone` to "talking to it". macOS first; Linux notes inline. Orchestrator runs in Docker; everything else (ASR, LLM, TTS, desktop-agent) runs natively on the host.
 
+## 0. Quick path — setup wizard
+
+If you already have the host services running (LLM, Whisper server, optionally TTS and desktop-agent), the wizard covers §1–§5 in one shot:
+
+```bash
+brew install go-task          # task runner — one-time
+task wizard                   # probe → write .env → optionally start
+```
+
+The wizard probes all five backends, reports what's ready and what needs attention, and offers to run `docker compose up -d` when everything is green. **It never installs or modifies globally-installed tools** — your existing Whisper server fork on `:18000` is detected and left exactly as-is.
+
+Other useful shortcuts:
+
+```bash
+task health     # quick status of all 5 backends
+task upgrade    # git pull + rebuild + restart
+task logs       # tail orchestrator logs
+task test       # run the pytest suite inside the container
+```
+
+Read on for the full manual walkthrough, or use this as a reference for what each service does.
+
+---
+
 ## 1. Prerequisites
 
 | What                  | Version       | Why                                                |
@@ -37,7 +61,7 @@ The model MUST support OpenAI-style tool calling for the agent loop. If it emits
 
 ## 3. Start the host services
 
-Bring them up in this order. For autostart see §10.
+Bring them up in this order. For autostart see §12.
 
 ### 3.1 Whisper (`:18000`)
 
@@ -111,7 +135,90 @@ docker compose logs orchestrator | tail -50
 curl -s http://localhost:8080/api/config | jq
 ```
 
-## 6. macOS permissions (one-time)
+## 6. Browser automation (optional)
+
+To enable "open this URL", "read the current page", "what tabs are open" voice commands, Chrome must be started with remote debugging enabled:
+
+```bash
+# macOS
+open -a "Google Chrome" --args --remote-debugging-port=9222
+
+# Linux
+google-chrome --remote-debugging-port=9222
+
+# Windows (PowerShell)
+Start-Process chrome -ArgumentList "--remote-debugging-port=9222"
+```
+
+Override the port via `CHROME_DEBUG_PORT` env on the desktop-agent side.  The daemon probes every 30 s — Chrome can be opened or closed mid-session and the capability flag updates automatically within one poll cycle.
+
+## 6b. Global dictation hotkey (optional)
+
+A system-wide keyboard shortcut lets you trigger voice dictation from any application — without switching to the browser tab.
+
+**Default combo:** `Ctrl+Shift+Space` on all platforms.  Override via `HOTKEY_COMBO` env on the desktop-agent.
+
+**How it works:**
+1. desktop-agent listens for the combo with pynput (daemon thread)
+2. On press: POSTs to the orchestrator's `/api/hotkey/ptt` endpoint
+3. Orchestrator fans a `ptt_trigger` event to every connected browser session
+4. Browser toggles PTT — first trigger starts recording, second trigger (or 10-second timeout) stops
+
+**Behaviour** — toggle mode:
+- Press once → PTT starts (browser shows "TALK" button pressed)
+- Press again → PTT stops immediately
+- No second press → auto-release after 10 seconds
+
+**Setup:**
+```bash
+# Use the default Ctrl+Shift+Space (no config needed)
+# Or override in desktop-agent/.env or your shell profile:
+export HOTKEY_COMBO="<cmd>+<shift>+space"       # macOS-preferred
+export ORCHESTRATOR_WEBHOOK_URL="http://localhost:8080"  # default — change if needed
+
+cd desktop-agent && ./start.sh
+```
+
+**macOS permission note:** pynput uses Quartz and requires Accessibility access — same as pyautogui (already granted if desktop-agent works). Symptom of missing permission: `hotkey: failed to start listener`.
+
+**Disable** the listener: `HOTKEY_ENABLED=0 ./start.sh`.
+
+Check status:
+```bash
+TOKEN=$(cat ~/.cache/voice-assistant/desktop-token)
+curl -s -H "X-Desktop-Token: $TOKEN" http://localhost:9877/v1/hotkey/status | jq
+```
+
+## 7. Live streaming to family devices (optional)
+
+Once the desktop-agent is running you can stream the host camera or any Chrome tab to any device on your LAN (tablet, TV, phone) — no extra software needed.
+
+**Voice commands:**
+```
+"покажи камеру"             → /api/stream/camera
+"stream this tab"           → /api/stream/tab
+"покажи вкладку на телевизоре"
+```
+
+**How it works:** The orchestrator proxies a MJPEG stream from the desktop-agent through `/api/stream/camera` or `/api/stream/tab`. The frontend renders it inline as a `<img>` tag. Any family device with a `va_session` cookie (i.e. logged in to the assistant) can open the stream URL directly too:
+
+```
+http://<orchestrator-host>:8080/api/stream/camera?fps=15
+http://<orchestrator-host>:8080/api/stream/tab?fps=5
+```
+
+**Stream sources and caps:**
+
+| Source | Default fps | Max fps | Notes |
+|--------|------------|---------|-------|
+| Camera | 15 | 30 | OpenCV device 0 |
+| Tab | 5 | 15 | CDP `Page.captureScreenshot` loop |
+
+Stop the stream by clicking the **Stop** button that appears in the frontend, or just close the tab on the viewing device.
+
+**Relay vs P2P:** The orchestrator runs on your LAN — all stream traffic stays local. Remote devices (outside your home network) see the same stream via the orchestrator's public URL (if you've exposed it with a reverse proxy; see §10 for HTTPS setup).
+
+## 8. macOS permissions (one-time)
 
 Three buckets:
 
@@ -121,7 +228,7 @@ Three buckets:
 
 Full details in `desktop-agent/README.md`'s "macOS permissions" section.
 
-## 7. Wake-word
+## 9. Wake-word
 
 Default phrase **"Hey Jarvis"**. Model lives at `frontend/models/hey_jarvis_v0.1.onnx`, loaded by the browser via `frontend/wake.js`.
 
@@ -132,7 +239,7 @@ Swap by:
 
 Threshold: `WAKE_WORD_THRESHOLD` (default `0.5`). Higher = fewer false wakes; lower = more sensitive.
 
-## 8. Web Push
+## 10. Web Push
 
 Lets the assistant notify you when the tab is closed — voicemail, reminders. Requires:
 
@@ -143,7 +250,7 @@ Click the bell icon to grant permission and register the subscription. `frontend
 
 For HTTPS via reverse proxy (caddy / nginx / traefik), point it at `:8080` and forward WebSocket frames with `Connection: Upgrade`. No extra auth wiring needed.
 
-## 9. Multi-agent setup
+## 11. Multi-agent setup
 
 For multiple agents — home Mac + work PC reachable from the same orchestrator — set `DESKTOP_AGENTS`:
 
@@ -159,7 +266,7 @@ Full schema: `docker-compose.yml:175-189`. The orchestrator caches each agent's 
 
 For NAT traversal (work PC behind corporate firewall), the recommended path is Tailscale or WireGuard. If a VPN isn't possible, the agent supports **reverse-WSS mode** where it dials the orchestrator — see `desktop-agent/README.md::Reverse-WSS mode`.
 
-## 10. Autostart
+## 12. Autostart
 
 macOS launchd templates:
 
@@ -174,7 +281,7 @@ For Linux, write a systemd user unit pointing at `./start.sh` in each directory.
 
 The orchestrator itself is Docker — `docker compose up -d` in your boot script, or `restart: unless-stopped` (already set at line 223) plus Docker Desktop / `dockerd` on boot.
 
-## 11. Backup / migration
+## 13. Backup / migration
 
 Everything stateful lives under `data/`:
 
@@ -193,7 +300,7 @@ Restore: stop, untar, start. Schema is idempotent (every migration is `CREATE IF
 
 XTTS model (`~/.cache/voice-assistant/xtts/`, 1.8 GB) is reproducible — not in the backup. Same for the fastembed model.
 
-## 12. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom                                         | Likely cause                                      | Fix                                                              |
 |-------------------------------------------------|---------------------------------------------------|------------------------------------------------------------------|

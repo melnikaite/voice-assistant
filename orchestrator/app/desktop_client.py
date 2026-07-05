@@ -165,6 +165,11 @@ class AgentInfo:
     # Surfaced in /api/agents so the UI can render «last seen 2 min
     # ago» when the agent is currently unreachable.
     last_seen: float = 0.0
+    # Lock state of the host machine.  Reported by the agent via the
+    # ``heartbeat`` frame (reverse-WSS) or the ``/v1/health`` response
+    # (HTTP poll).  None = never reported yet (treat as unlocked so
+    # tools fail-open rather than closed on a cold agent boot).
+    locked: bool | None = None
 
 
 # Registry — module-level mutable dict.  ``init_desktop`` populates
@@ -272,6 +277,22 @@ def get_agent(agent_id: str | None) -> AgentInfo | None:
     return next(iter(_AGENTS.values()))
 
 
+def is_valid_token(token: str) -> bool:
+    """Return True if ``token`` matches ANY registered agent's token.
+
+    Used by the /api/hotkey/ptt endpoint to authenticate desktop-agent
+    webhook POSTs without needing to know the sender's agent_id.  Uses
+    constant-time comparison on each candidate to prevent timing attacks.
+    """
+    import secrets
+    if not token:
+        return False
+    for info in _AGENTS.values():
+        if info.token and secrets.compare_digest(token, info.token):
+            return True
+    return False
+
+
 def register_reverse_agent(agent_id: str, token: str) -> AgentInfo:
     """Plug a freshly-connected reverse-WSS agent into the registry.
 
@@ -296,6 +317,20 @@ def register_reverse_agent(agent_id: str, token: str) -> AgentInfo:
     )
     _AGENTS[agent_id] = info
     return info
+
+
+def update_agent_lock_state(agent_id: str, locked: bool) -> None:
+    """Record the host's screen-lock state from a heartbeat or health probe.
+
+    Called by :mod:`.agent_proxy` on ``heartbeat`` frames and by the
+    HTTP-mode health poll when ``/v1/health`` includes ``"locked"``.
+    ``None`` in the field means "never heard from" — callers treat that
+    the same as unlocked so we fail-open on cold boot.
+    """
+    info = _AGENTS.get(agent_id)
+    if info is not None:
+        info.locked = locked
+        info.last_seen = time.time()
 
 
 def unregister_reverse_agent(agent_id: str) -> None:
@@ -347,6 +382,12 @@ async def _probe_health(info: AgentInfo) -> dict | None:
             data = r.json()
         info.reachable = True
         info.last_seen = time.time()
+        # Read lock state if the agent includes it in the health response.
+        # Agents that haven't been updated yet omit the field; in that
+        # case ``locked`` stays as-is (None on cold boot, last-known
+        # value thereafter).
+        if "locked" in data:
+            info.locked = bool(data["locked"])
         return data
     except Exception as exc:
         info.reachable = False
@@ -718,6 +759,233 @@ async def screenshot(agent_id: str | None = None) -> bytes:
     info.reachable = True
     info.last_seen = time.time()
     return r.content
+
+
+async def camera_capture(agent_id: str | None = None) -> bytes:
+    """Capture a single JPEG frame from the chosen agent's default camera.
+
+    Returns raw JPEG bytes.  Raises :class:`DesktopUnavailable` on
+    transport / auth failure or when the agent reports that it has no
+    camera (503 → same exception shape as screenshot so callers don't
+    need separate error handling).
+    """
+    info = get_agent(agent_id)
+    if info is None:
+        raise DesktopUnavailable("no agent configured")
+    if info.mode == "reverse":
+        result = await _reverse_call(info, "camera", {}, timeout=20.0)
+        import base64
+        b64 = (result or {}).get("jpg_b64") if isinstance(result, dict) else None
+        if not b64:
+            raise DesktopUnavailable("reverse: malformed camera response")
+        return base64.b64decode(b64)
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.get(
+                f"{info.url}/v1/camera",
+                headers={"X-Desktop-Token": info.token} if info.token else {},
+            )
+    except httpx.HTTPError as exc:
+        info.reachable = False
+        raise DesktopUnavailable(f"transport: {exc.__class__.__name__}") from exc
+    if r.status_code in (401, 503):
+        raise DesktopUnavailable(f"daemon: {r.text}")
+    r.raise_for_status()
+    info.reachable = True
+    info.last_seen = time.time()
+    return r.content
+
+
+async def browser_list_tabs(*, agent_id: str | None = None) -> list[dict]:
+    """List open Chrome page tabs on the chosen agent's host.
+
+    Returns a list of ``{id, title, url, type, ws_url}`` dicts — only
+    page-type tabs with an active WS debugger URL are returned.  Raises
+    :class:`DesktopUnavailable` when the agent is offline or Chrome isn't
+    running with ``--remote-debugging-port``.
+    """
+    info = get_agent(agent_id)
+    if info is None:
+        raise DesktopUnavailable("no agent configured")
+    if info.mode == "reverse":
+        result = await _reverse_call(info, "browser_tabs", {}, timeout=10.0)
+        return (result or {}).get("tabs") or []
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.get(f"{info.url}/v1/browser/tabs", headers=_headers(info))
+    except httpx.HTTPError as exc:
+        info.reachable = False
+        raise DesktopUnavailable(f"transport: {exc.__class__.__name__}") from exc
+    if r.status_code in (401, 503):
+        raise DesktopUnavailable(f"daemon: {r.text}")
+    r.raise_for_status()
+    info.reachable = True
+    info.last_seen = time.time()
+    return r.json().get("tabs") or []
+
+
+async def browser_navigate(
+    url: str,
+    *,
+    tab_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Navigate a Chrome tab to ``url``, or open a new tab if ``tab_id`` is None.
+
+    Returns ``{ok, tab_id, url}`` (plus ``frame_id`` when navigating an
+    existing tab).  Raises :class:`DesktopUnavailable` on transport /
+    agent / Chrome errors.
+    """
+    info = get_agent(agent_id)
+    if info is None:
+        raise DesktopUnavailable("no agent configured")
+    if info.mode == "reverse":
+        return await _reverse_call(
+            info, "browser_navigate",
+            {"url": url, "tab_id": tab_id},
+            timeout=20.0,
+        ) or {}
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.post(
+                f"{info.url}/v1/browser/navigate",
+                json={"url": url, "tab_id": tab_id},
+                headers=_headers(info),
+            )
+    except httpx.HTTPError as exc:
+        info.reachable = False
+        raise DesktopUnavailable(f"transport: {exc.__class__.__name__}") from exc
+    if r.status_code in (401, 503):
+        raise DesktopUnavailable(f"daemon: {r.text}")
+    r.raise_for_status()
+    info.reachable = True
+    info.last_seen = time.time()
+    return r.json()
+
+
+async def browser_js(
+    code: str,
+    *,
+    tab_id: str | None = None,
+    agent_id: str | None = None,
+    timeout: float = 10.0,
+) -> dict:
+    """Evaluate ``code`` in the browser tab and return the CDP result.
+
+    Returns ``{ok, tab_id, type, value, description}``.  ``value`` is
+    the JSON-serialisable result when ``returnByValue=True`` (default).
+    Raises :class:`DesktopUnavailable` on transport errors; raises a
+    plain ``RuntimeError`` when the JS expression throws.
+    """
+    info = get_agent(agent_id)
+    if info is None:
+        raise DesktopUnavailable("no agent configured")
+    if info.mode == "reverse":
+        return await _reverse_call(
+            info, "browser_js",
+            {"code": code, "tab_id": tab_id, "timeout": timeout},
+            timeout=timeout + 5,
+        ) or {}
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.post(
+                f"{info.url}/v1/browser/js",
+                json={"code": code, "tab_id": tab_id, "timeout": timeout},
+                headers=_headers(info),
+            )
+    except httpx.HTTPError as exc:
+        info.reachable = False
+        raise DesktopUnavailable(f"transport: {exc.__class__.__name__}") from exc
+    if r.status_code in (401, 503):
+        raise DesktopUnavailable(f"daemon: {r.text}")
+    r.raise_for_status()
+    info.reachable = True
+    info.last_seen = time.time()
+    return r.json()
+
+
+async def browser_screenshot(
+    *,
+    tab_id: str | None = None,
+    agent_id: str | None = None,
+) -> bytes:
+    """Capture a PNG screenshot of a specific Chrome tab.
+
+    Returns raw PNG bytes — same shape as :func:`screenshot` but for a
+    single tab rather than the full display.  Raises
+    :class:`DesktopUnavailable` on transport / Chrome errors.
+    """
+    info = get_agent(agent_id)
+    if info is None:
+        raise DesktopUnavailable("no agent configured")
+    if info.mode == "reverse":
+        result = await _reverse_call(
+            info, "browser_screenshot", {"tab_id": tab_id}, timeout=20.0,
+        )
+        import base64
+        b64 = (result or {}).get("png_b64") if isinstance(result, dict) else None
+        if not b64:
+            raise DesktopUnavailable("reverse: malformed browser screenshot response")
+        return base64.b64decode(b64)
+    try:
+        params: dict[str, Any] = {}
+        if tab_id:
+            params["tab_id"] = tab_id
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.get(
+                f"{info.url}/v1/browser/screenshot",
+                params=params,
+                headers={"X-Desktop-Token": info.token} if info.token else {},
+            )
+    except httpx.HTTPError as exc:
+        info.reachable = False
+        raise DesktopUnavailable(f"transport: {exc.__class__.__name__}") from exc
+    if r.status_code in (401, 503):
+        raise DesktopUnavailable(f"daemon: {r.text}")
+    r.raise_for_status()
+    info.reachable = True
+    info.last_seen = time.time()
+    return r.content
+
+
+async def browser_page_text(
+    *,
+    tab_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Extract the visible text of a Chrome tab.
+
+    Returns ``{text, url, title, tab_id}``.  ``text`` is the tab's
+    ``document.body.innerText`` — plain readable text, no HTML tags.
+    Raises :class:`DesktopUnavailable` on transport / Chrome errors.
+    """
+    info = get_agent(agent_id)
+    if info is None:
+        raise DesktopUnavailable("no agent configured")
+    if info.mode == "reverse":
+        result = await _reverse_call(
+            info, "browser_page_text", {"tab_id": tab_id}, timeout=15.0,
+        )
+        return result or {}
+    try:
+        params: dict[str, Any] = {}
+        if tab_id:
+            params["tab_id"] = tab_id
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            r = await c.get(
+                f"{info.url}/v1/browser/page_text",
+                params=params,
+                headers=_headers(info),
+            )
+    except httpx.HTTPError as exc:
+        info.reachable = False
+        raise DesktopUnavailable(f"transport: {exc.__class__.__name__}") from exc
+    if r.status_code in (401, 503):
+        raise DesktopUnavailable(f"daemon: {r.text}")
+    r.raise_for_status()
+    info.reachable = True
+    info.last_seen = time.time()
+    return r.json()
 
 
 async def submit_audit(event: str, *, agent_id: str | None = None, **payload: Any) -> None:

@@ -39,7 +39,11 @@ log = logging.getLogger(__name__)
 # orchestrator after editing DESKTOP_AGENTS).  Same pattern is used by
 # tools/computer_use.py — the dynamic-schema trick avoids surfacing
 # an extra param when the user only has one device anyway.
-_INCLUDE_AGENT_ID = len(desktop_client.list_agents()) > 1
+# Always advertise the optional agent_id param.  Resolution happens at
+# call time via desktop_client.get_agent(), so agents that connect via
+# reverse-WSS AFTER startup are still reachable (the old import-time
+# snapshot left them invisible to the LLM until a restart).
+_INCLUDE_AGENT_ID = True
 
 
 def _schema() -> dict:
@@ -80,6 +84,8 @@ def _schema() -> dict:
     ),
     params_schema=_schema(),
     risk="read",
+    tier="device",
+    device_kind="macos_agent",
 )
 async def look_at_screen(
     question: str, *, ctx=None, agent_id: str | None = None,

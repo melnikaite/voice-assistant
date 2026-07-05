@@ -32,8 +32,9 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('push', (event) => {
-  // Push payload shape (set by orchestrator/app/push.py):
-  //   {title, body, voicemail_id, tag}
+  // Push payload shapes:
+  //   voicemail:  {title, body, voicemail_id, tag}
+  //   step-up:    {type:"step_up_request", title, body, tag, token, open_url}
   // event.data may be null on test/empty pushes — fall back to the
   // generic shape so the user still sees something.
   let payload = {};
@@ -41,44 +42,83 @@ self.addEventListener('push', (event) => {
     try {
       payload = event.data.json();
     } catch (e) {
-      // Some push services hand us a raw string for older payload
-      // formats — best-effort show the text.
       payload = { title: 'Voice Assistant', body: event.data.text() };
     }
   }
   const title = payload.title || 'Voice Assistant';
+  const isStepUp = payload.type === 'step_up_request';
   const options = {
     body: payload.body || '',
     tag: payload.tag || (payload.voicemail_id ? `voicemail-${payload.voicemail_id}` : undefined),
-    // Coalesce: a follow-up push for the SAME voicemail replaces the
-    // previous toast instead of stacking 3 of them on screen.  This is
-    // what the `tag` attribute is for.
     renotify: false,
     data: {
       voicemail_id: payload.voicemail_id ?? null,
-      // Stash an opening URL so notificationclick can navigate without
-      // guessing the path layout.
-      open_url: payload.voicemail_id
-        ? `/?voicemail=${payload.voicemail_id}`
-        : '/',
+      // Step-up: carry the opaque grant token; the click handler POSTs it
+      // to /api/step-up/approve (token never goes in a URL).
+      step_up_token: isStepUp ? (payload.token || null) : null,
+      // Non-step-up: navigate to this URL on tap.
+      open_url: !isStepUp
+        ? (payload.voicemail_id ? `/?voicemail=${payload.voicemail_id}` : '/')
+        : null,
     },
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
 self.addEventListener('notificationclick', (event) => {
-  // Three goals, in order:
-  //   1. If the app is already open in some tab, focus it (don't
-  //      multiply tabs on every push click).
-  //   2. Otherwise, open a fresh tab at the URL stashed in the
-  //      notification's `data` field.
-  //   3. Close the notification toast — most browsers do this for us
-  //      after a click, but being explicit avoids a lingering chip on
-  //      browsers that don't.
+  // Two kinds of notification clicks:
+  //
+  //   Step-up approval  (data.step_up_approve_url is set):
+  //     Do a background fetch to POST /api/step-up/approve with the
+  //     token embedded in the URL.  The orchestrator broadcasts
+  //     step_up_granted over WS; the open tab receives it and sets the
+  //     session flag so the next voice turn can execute the gated tool.
+  //     We focus an existing tab so the user sees the confirmation
+  //     toast, but don't navigate — the tap itself is the auth action.
+  //
+  //   Voicemail / generic  (data.open_url is set):
+  //     Focus an existing same-origin tab or open a new one, then
+  //     postMessage so main.js can jump to the linked content.
   event.notification.close();
-  const openUrl = event.notification.data?.open_url || '/';
+  const notifData = event.notification.data || {};
+  const stepUpToken = notifData.step_up_token;
+  const openUrl = notifData.open_url || '/';
+
   event.waitUntil(
     (async () => {
+      // ── Step-up path ────────────────────────────────────────────────
+      if (stepUpToken) {
+        try {
+          // Background fetch — no tab required.  POST the opaque grant
+          // token in the body (never a URL/query string) so it can't
+          // leak via access logs / Referer / history.
+          await fetch('/api/step-up/approve', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: stepUpToken }),
+          });
+        } catch (e) {
+          // Best-effort — if the tab is open it will show an error toast.
+        }
+        // Focus the open tab so the user sees the step_up_granted WS
+        // event's confirmation toast ("Confirmed! Ask again.").
+        const allClients = await self.clients.matchAll({
+          type: 'window',
+          includeUncontrolled: true,
+        });
+        for (const client of allClients) {
+          try {
+            if (new URL(client.url).origin === self.location.origin) {
+              await client.focus();
+              return;
+            }
+          } catch {}
+        }
+        return; // No open tab — approval was still sent in background.
+      }
+
+      // ── Voicemail / generic path ─────────────────────────────────────
       const allClients = await self.clients.matchAll({
         type: 'window',
         includeUncontrolled: true,
@@ -94,7 +134,7 @@ self.addEventListener('notificationclick', (event) => {
             try {
               client.postMessage({
                 type: 'sw_notification_click',
-                voicemail_id: event.notification.data?.voicemail_id || null,
+                voicemail_id: notifData.voicemail_id || null,
                 open_url: openUrl,
               });
             } catch (e) {

@@ -21,6 +21,13 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
+# Force uv's OWN CPython toolchain, never the system/brew one.  macOS
+# Accessibility (TCC) grants pin the interpreter's absolute path: a brew
+# python bumps its Cellar revision on any passing `brew upgrade` and the
+# grant silently dies; uv's toolchain path only changes when the python
+# version itself is deliberately upgraded (then re-grant once).
+export UV_PYTHON_PREFERENCE=only-managed
+
 # uv sync brings the .venv into existence (Python 3.12 from uv's own
 # toolchain, fastapi + uvicorn + pyautogui + Pillow + platform-specific
 # extras).  On a fresh install this is the only step that hits the network.

@@ -19,6 +19,8 @@ from .schema import init_schema
 from .sessions import get_recent_history, start_session
 from .utterances import (
     get_candidate_utterances,
+    get_tool_perf,
+    get_voice_turns_today,
     save_utterance,
     update_utterance_embedding,
 )
@@ -69,6 +71,12 @@ from .auth_sessions import (
     get_session,
     revoke_session,
     sweep_expired_sessions,
+)
+from .step_up_grants import (
+    GRANT_TTL_S,
+    consume_grant as consume_step_up_grant,
+    create_grant as create_step_up_grant,
+    purge_expired_grants as purge_step_up_grants,
 )
 from .push_subscriptions import (
     delete_by_endpoint as delete_push_subscription,
@@ -136,6 +144,8 @@ __all__ = [
     "save_utterance",
     "update_utterance_embedding",
     "get_candidate_utterances",
+    "get_tool_perf",
+    "get_voice_turns_today",
     # reminders
     "add_reminder",
     "mark_reminder_fired",
@@ -178,6 +188,11 @@ __all__ = [
     "get_session",
     "revoke_session",
     "sweep_expired_sessions",
+    # step-up grants (#55)
+    "create_step_up_grant",
+    "consume_step_up_grant",
+    "purge_step_up_grants",
+    "GRANT_TTL_S",
     # push subscriptions (Web Push)
     "upsert_push_subscription",
     "list_push_subscriptions",

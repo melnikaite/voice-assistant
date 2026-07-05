@@ -64,6 +64,14 @@ LLM_TEXT_MODEL = os.environ.get("LLM_TEXT_MODEL", LLM_MODEL)
 LLM_VISION_URL = os.environ.get("LLM_VISION_URL", LLM_URL)
 LLM_VISION_MODEL = os.environ.get("LLM_VISION_MODEL", LLM_MODEL)
 
+# Deployment-level override for reasoning effort — wins over per-call
+# values when set.  llama.cpp/LocalAI accept "none", which fully disables
+# Gemma's ADAPTIVE thinking: without it the model sporadically spends
+# seconds on chain-of-thought (measured 1-2 turns out of 6 even at
+# "low"), and a voice reply cannot afford that.  Leave unset for
+# providers that reject non-OpenAI values.
+LLM_REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT") or None
+
 # Default = full Gemma 4 E4B context (131072 tokens). Per-deployment overrides
 # go through LLM_MAX_TOKENS env var. Since input prompts are tiny, the model
 # stops on EOS long before hitting this — it's just an upper bound.
@@ -216,9 +224,12 @@ async def chat(
     if tools is not None:
         body["tools"] = tools
         body["tool_choice"] = tool_choice or "auto"
+    if LLM_REASONING_EFFORT is not None:
+        reasoning_effort = LLM_REASONING_EFFORT
     if reasoning_effort is not None:
-        # "low" | "medium" | "high" — controls how many tokens the model spends
-        # in chain-of-thought before producing the final answer.
+        # "low" | "medium" | "high" (| "none" on llama.cpp/LocalAI) — controls
+        # how many tokens the model spends in chain-of-thought before
+        # producing the final answer.
         body["reasoning_effort"] = reasoning_effort
 
     t_o = timeout if timeout is not None else LLM_TIMEOUT
@@ -299,6 +310,8 @@ async def chat_stream(
         # totals.  Without this flag streamed calls give us no usage info.
         "stream_options": {"include_usage": True},
     }
+    if LLM_REASONING_EFFORT is not None:
+        reasoning_effort = LLM_REASONING_EFFORT
     if reasoning_effort is not None:
         body["reasoning_effort"] = reasoning_effort
 

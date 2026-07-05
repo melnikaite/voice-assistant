@@ -42,7 +42,7 @@ from __future__ import annotations
 import inspect
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
 
 if TYPE_CHECKING:
     from ..agent import AgentContext
@@ -54,6 +54,23 @@ log = logging.getLogger(__name__)
 # ``agent._execute_one`` to decide whether a tool call may run as-is,
 # must wait on a passphrase, or should be enqueued for later approval.
 RiskLevel = Literal["read", "low_write", "high_write"]
+
+# Tier levels — where a tool may run:
+#   "system"  default.  Pure-compute or orchestrator-internal (calculator,
+#             memory, web_search, reminders, voicemail, etc.).  No external
+#             dependency beyond the orchestrator itself.  Available in every
+#             session regardless of device_kind.
+#   "device"  Requires a specific desktop-agent type to be reachable and
+#             matching the session's device_kind.  Tools decorated with
+#             tier="device" are hidden from sessions where
+#             session.device_kind != tool.device_kind (the LLM never sees
+#             them and never tries to call them).  computer_use,
+#             look_at_screen, desktop fall here.
+#   "api"     Requires per-profile OAuth / API tokens.  Visible to all
+#             sessions but gated at dispatch time on token presence.
+#             (Reserved for future Gmail / Calendar / Spotify tools —
+#             none exist yet; token check scaffold goes in dispatch().)
+TierLevel = Literal["system", "device", "api"]
 
 
 @dataclass
@@ -107,7 +124,7 @@ class ToolCtx:
     ``ctx`` themselves.  This helper is the 90% case.
     """
 
-    __slots__ = ("client_id", "user_lang", "profile_id", "is_authenticated", "_progress_sink", "_stream_sink")
+    __slots__ = ("client_id", "user_lang", "profile_id", "is_authenticated", "_progress_sink", "_stream_sink", "_media_sink")
 
     def __init__(self, ctx: "Any | None"):
         self.client_id = getattr(ctx, "client_id", None) if ctx else None
@@ -116,6 +133,7 @@ class ToolCtx:
         self.is_authenticated = bool(getattr(ctx, "is_authenticated", False)) if ctx else False
         self._progress_sink = getattr(ctx, "progress_sink", None) if ctx else None
         self._stream_sink = getattr(ctx, "stream_sink", None) if ctx else None
+        self._media_sink = getattr(ctx, "media_sink", None) if ctx else None
 
     async def progress(self, step: str, detail: str | None = None) -> None:
         """No-op when there's no upstream sink (e.g. /dev/respond)."""
@@ -130,6 +148,22 @@ class ToolCtx:
     @property
     def stream_sink(self):
         return self._stream_sink
+
+    async def media(self, url: str, source: str) -> None:
+        """Notify the WS layer that a live MJPEG stream has started.
+
+        ``url`` is the relative URL the browser loads in an <img> tag,
+        e.g. ``/api/stream/camera?fps=15``.
+        ``source`` is a short identifier for the UI label, e.g. ``"camera"``.
+        No-ops when there is no upstream sink.
+        """
+        sink = self._media_sink
+        if sink is None:
+            return
+        try:
+            await sink(url, source)
+        except Exception:
+            log.debug("ToolCtx.media: sink raised", exc_info=True)
 
 
 def unwrap_ctx(ctx: "Any | None") -> ToolCtx:
@@ -149,6 +183,11 @@ def tool(
     *,
     terminal: bool = True,
     risk: "RiskLevel | Callable[[dict], RiskLevel]" = "read",
+    tier: "TierLevel" = "system",
+    device_kind: str | None = None,
+    requires_token: "Sequence[str]" = (),
+    locked_compat: "Literal['always', 'needs_unlock', 'auto_detect']" = "always",
+    private: bool = False,
 ):
     """Decorator: register an async function as an LLM-callable tool.
 
@@ -159,6 +198,40 @@ def tool(
     For multi-action tools pass a callable ``(args: dict) -> RiskLevel``
     instead of a fixed string.  The agent loop calls it with the actual
     args at dispatch time so per-action gating is fully dynamic.
+
+    ``tier`` controls where the tool may run (see :data:`TierLevel`).
+    Default is ``"system"`` — available everywhere, no external dependency.
+
+    ``device_kind`` is required when ``tier="device"``; it names the
+    desktop-agent type that must be connected and matching the session's
+    ``device_kind`` field.  Example: ``device_kind="macos_agent"``.
+
+    ``requires_token`` is a list of service identifiers whose per-profile
+    OAuth / API tokens must be present before the tool can run.  Only
+    relevant for ``tier="api"`` tools; dispatch checks presence and
+    returns a friendly prompt-to-connect message when a token is missing.
+
+    ``locked_compat`` describes how the tool behaves when the host screen
+    is locked (only meaningful for ``tier="device"`` tools):
+      - ``"always"``      — works even when the screen is locked; true for
+                            the vast majority of tools because they use
+                            AppleScript / COM / D-Bus which don't require
+                            an active UI session.  **Default.**
+      - ``"needs_unlock"`` — explicitly requires an unlocked screen (e.g.
+                             UI-scripting that drives the focus window).
+                             The device_router returns a user-facing error
+                             when the device is locked.
+      - ``"auto_detect"`` — tries the primary path (usually API-driven);
+                            falls back to UI-scripting when the API doesn't
+                            work, which then requires unlock.  The tool
+                            itself handles the conditional and may call
+                            ``AgentInfo.locked`` to decide.
+
+    ``private`` — when ``True``, the tool requires a step-up auth grant
+    before execution.  The speaker must have tapped the Web Push
+    notification for this session in the last ``GRANT_TTL_S`` seconds.
+    Missing grant → deferred with a push notification sent, voice reply
+    "tap your device to confirm, then ask again".  Defaults to ``False``.
     """
 
     def deco(fn: ToolHandler):
@@ -177,6 +250,11 @@ def tool(
             "handler": fn,
             "terminal": terminal,
             "risk": risk,
+            "tier": tier,
+            "device_kind": device_kind,
+            "requires_token": list(requires_token),
+            "locked_compat": locked_compat,
+            "private": private,
             "wants_ctx": "ctx" in sig.parameters,
         }
         return fn

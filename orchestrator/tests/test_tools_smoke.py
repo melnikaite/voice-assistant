@@ -65,6 +65,9 @@ def test_known_tools_are_registered():
         "read_settings", "reminders", "items", "categories",
         "inbox_list", "inbox_read", "inbox_reply", "inbox_summary",
         "list_pending", "approve_pending", "reject_pending",
+        # Newer tools (#47/#51/#53/#54) — pin them so a future deletion shows up.
+        "look_at_camera", "stream_camera", "stream_tab", "summarize_url",
+        "navigate_browser", "read_browser_tab", "list_browser_tabs",
     }
     missing = expected - set(TOOL_REGISTRY.keys())
     assert not missing, f"tools disappeared: {missing}"
@@ -74,11 +77,16 @@ def test_known_tools_are_registered():
 
 
 async def test_calculator_arith_addition():
-    """2+2=4 — the hello-world smoke."""
+    """2+2=4 — the hello-world smoke.
+
+    Assert on the STRUCTURED result, not the spoken text: ``_format_number``
+    spells small integers as words for natural TTS ("Result: four") whenever
+    ``num2words`` is installed (it's a declared runtime dep), so a substring
+    check for "4" is brittle — it only holds when num2words is ABSENT.
+    """
     result = await dispatch("calculator", {"mode": "arith", "expression": "2 + 2"}, ctx=_ctx())
-    assert "4" in result.text
     assert result.data is not None
-    # 'value' key isn't standard; just confirm no error flag.
+    assert result.data.get("result") == 4
     assert "error" not in (result.data or {})
 
 

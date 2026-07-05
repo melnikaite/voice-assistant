@@ -84,6 +84,7 @@ _SIMILARITY_THRESHOLD = 0.55  # looser than memory_context (0.72) — search
         "required": ["query"],
     },
     risk="read",
+    private=True,  # requires push-to-device step-up approval (#55)
 )
 async def my_history(
     query: str,

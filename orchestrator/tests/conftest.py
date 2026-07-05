@@ -39,6 +39,12 @@ os.environ.setdefault("LLM_URL", "http://test-llm")
 os.environ.setdefault("LLM_MODEL", "test-llm-model")
 os.environ.setdefault("WHISPER_URL", "http://test-whisper")
 os.environ.setdefault("WHISPER_MODEL", "test-whisper-model")
+# main.py mounts StaticFiles at import time; the container default
+# (/app/static) doesn't exist on a host checkout, so point at the real
+# PWA directory next to the orchestrator.
+os.environ.setdefault(
+    "STATIC_DIR", str(Path(__file__).resolve().parent.parent.parent / "frontend")
+)
 
 # Point storage at an ephemeral file.  ``:memory:`` would be tempting
 # but breaks thread-locals (each pool thread gets its own DB), so we

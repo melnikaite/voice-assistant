@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libopus0 \
     ca-certificates \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
@@ -34,7 +35,8 @@ RUN pip install --no-cache-dir \
     'bcrypt>=4.1' \
     'pywebpush>=2.0' \
     'num2words>=0.5.13' \
-    'Babel>=2.16'
+    'Babel>=2.16' \
+    'yt-dlp>=2025.1'
 # Locale-aware helpers:
 #   num2words → "fifteen" / "пятнадцать" / "fünfzehn" — 40+ languages.
 #   Babel     → format_timedelta, currency names, date/time per locale.

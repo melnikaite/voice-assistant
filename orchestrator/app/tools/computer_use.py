@@ -229,6 +229,8 @@ async def _llm_generate_applescript(
         "required": ["goal"],
     },
     risk="read",
+    tier="device",
+    device_kind="macos_agent",
 )
 async def computer_use(
     *, ctx, goal: str, agent_id: str | None = None,

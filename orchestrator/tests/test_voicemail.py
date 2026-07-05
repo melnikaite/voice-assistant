@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.speaker import SpeakerAttribution
 from app.pipeline import (
     SAMPLE_BYTES_PER_SECOND,
     Pipeline,
@@ -241,6 +242,9 @@ class _VoicemailHooks:
     async def cookie_profile_id(self):
         return None
 
+    async def current_step_up_auth_until(self):
+        return None
+
     def find(self, kind):
         return [e for e in self.events if e[0] == kind]
 
@@ -260,7 +264,7 @@ async def test_voicemail_pipeline_branch_saves_and_skips_agent():
         new=AsyncMock(return_value=("передай Жене что я опоздаю", 100)),
     ), patch.object(
         Pipeline, "_resolve_speaker",
-        new=AsyncMock(return_value=("Алиса", None, pid_alice)),
+        new=AsyncMock(return_value=SpeakerAttribution(mode="single", name="Алиса", profile_id=pid_alice)),
     ), patch(
         "app.pipeline.run_agent", new=AsyncMock(),
     ) as agent:
@@ -301,7 +305,7 @@ async def test_voicemail_unknown_recipient_short_circuits():
         new=AsyncMock(return_value=("передай Бобу что я опоздаю", 100)),
     ), patch.object(
         Pipeline, "_resolve_speaker",
-        new=AsyncMock(return_value=("Алиса", None, pid_alice)),
+        new=AsyncMock(return_value=SpeakerAttribution(mode="single", name="Алиса", profile_id=pid_alice)),
     ), patch(
         "app.pipeline.run_agent", new=AsyncMock(),
     ) as agent:
@@ -547,7 +551,7 @@ async def test_pipeline_replay_unseen_reply_to_sender(make_agent_ctx):
         new=AsyncMock(return_value=("какая погода", 50)),
     ), patch.object(
         Pipeline, "_resolve_speaker",
-        new=AsyncMock(return_value=("Алиса", None, pid_alice)),
+        new=AsyncMock(return_value=SpeakerAttribution(mode="single", name="Алиса", profile_id=pid_alice)),
     ), patch(
         "app.pipeline.run_agent", new=AsyncMock(return_value=fake_result),
     ) as agent, patch.object(pm, "EMBEDDING_ENABLED", False):
@@ -575,7 +579,7 @@ async def test_pipeline_replay_unseen_reply_to_sender(make_agent_ctx):
         new=AsyncMock(return_value=("сколько времени", 50)),
     ), patch.object(
         Pipeline, "_resolve_speaker",
-        new=AsyncMock(return_value=("Алиса", None, pid_alice)),
+        new=AsyncMock(return_value=SpeakerAttribution(mode="single", name="Алиса", profile_id=pid_alice)),
     ), patch(
         "app.pipeline.run_agent", new=AsyncMock(return_value=fake_result),
     ) as agent2, patch.object(pm, "EMBEDDING_ENABLED", False):

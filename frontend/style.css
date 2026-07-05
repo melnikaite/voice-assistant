@@ -1,3 +1,25 @@
+/* Ephemeral toast chip (step-up granted, etc.) */
+.va-toast {
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%) translateY(120%);
+  background: var(--pico-primary, #0d6efd);
+  color: #fff;
+  padding: 0.5rem 1.2rem;
+  border-radius: 2rem;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  z-index: 9999;
+}
+.va-toast.va-toast-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
 /* Big state indicator */
 #state-card {
   padding: 1rem;
@@ -234,6 +256,61 @@ article {
   .stats-grid .stats-card:first-child {
     grid-column: 1 / -1;
   }
+}
+
+/* --- Observability: system health strip + tool perf table --- */
+
+.stats-system {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+}
+.sys-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.4rem 0.8rem;
+  background: var(--pico-secondary-background, rgba(127, 127, 127, 0.1));
+  border-radius: 0.4rem;
+  min-width: 80px;
+}
+.sys-chip small {
+  font-size: 0.7rem;
+  color: var(--pico-muted-color);
+  text-align: center;
+  margin-bottom: 0.1rem;
+}
+.sys-chip strong {
+  font-size: 1.1rem;
+  font-variant-numeric: tabular-nums;
+}
+.tool-perf-wrap {
+  overflow-x: auto;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.tool-perf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin: 0;
+}
+.tool-perf-table th,
+.tool-perf-table td {
+  padding: 0.25rem 0.5rem;
+  text-align: right;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+}
+.tool-perf-table th:first-child,
+.tool-perf-table td:first-child {
+  text-align: left;
+}
+.tool-perf-table tbody tr:hover {
+  background: var(--pico-secondary-background, rgba(127, 127, 127, 0.08));
+}
+.tool-perf-err {
+  color: var(--pico-del-color, #c0392b);
 }
 
 /* --- Sprint 2 auth banner + pending/memory/settings panels --- */

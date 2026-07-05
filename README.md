@@ -14,13 +14,14 @@ most tasks.
 
 - 🎙️ **Browser wake-word** ("Hey Jarvis" out of the box, retrain
   with [openWakeWord](https://github.com/dscripka/openWakeWord)).
-- 📝 **Streaming transcription** via local
-  [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper)
-  (Apple Silicon) or any OpenAI-compatible Whisper server.
+- 📝 **Streaming transcription** via whisper.cpp (Metal/CUDA, served
+  by LocalAI) or any OpenAI-compatible Whisper server (mlx-whisper,
+  faster-whisper).
 - 🧠 **Local LLM agent loop** via any OpenAI-compatible endpoint —
-  default is [LM Studio](https://lmstudio.ai) running Gemma 4 E4B
-  (multimodal, so vision rides on the same endpoint).  Works with
-  Ollama, vLLM, llama.cpp out of the box.
+  default is [LocalAI](https://localai.io) (llama.cpp on Metal/CUDA)
+  running Gemma 4 E4B QAT: multimodal, so vision rides on the same
+  endpoint, and ASR shares the same server.  Works with Ollama, vLLM,
+  llama.cpp, LM Studio out of the box.
 - 🛠️ **Tools** — calculator, weather, web search, news, translate,
   reminders/timers, semantic memory, computer control via
   AppleScript or vision-loop, and Mail/Calendar bridges through the
@@ -56,17 +57,36 @@ locally-hosted models.
 
 ## Quickstart
 
-Prereqs: Docker Desktop 4.34+ with host networking enabled (macOS) or
-Linux with native Docker; `uv` for the host-side services; one of
-LM Studio / Ollama / vLLM running an OpenAI-compatible chat endpoint.
+Prereqs: [`uv`](https://docs.astral.sh/uv/) — every service runs
+natively in its own uv venv (no Docker needed); LocalAI (recommended —
+one server covers LLM + ASR) or any OpenAI-compatible chat endpoint
+(Ollama, vLLM, LM Studio).  Docker is only used by the optional
+Linux-server path (`docker-compose.yml`).
+
+**Fastest path** — if you have [go-task](https://taskfile.dev) installed
+(`brew install go-task`), the setup wizard probes all backends and
+writes `.env` for you:
+
+```bash
+git clone <repo> voice-assistant
+cd voice-assistant
+task wizard          # probe → configure → optionally start
+```
+
+**Manual path:**
 
 ```bash
 git clone <repo> voice-assistant
 cd voice-assistant
 
-# 1. Start the LLM server (any OpenAI-compatible).  Default uses
-#    LM Studio at http://localhost:1234 with a multimodal model.
-#    Override LLM_URL / LLM_MODEL in docker-compose.yml or .env.
+# 1. Start the LLM+ASR server (any OpenAI-compatible).  Default is
+#    LocalAI at http://localhost:1240 with a multimodal model:
+#      brew install localai
+#      local-ai backends install llama-cpp && local-ai backends install whisper
+#      local-ai models install gemma-4-e4b-it-qat-q4_0
+#      local-ai models install whisper-large-q5_0
+#      local-ai run --address 127.0.0.1:1240 --models-path ~/.localai/models
+#    Override LLM_URL / LLM_MODEL / WHISPER_URL in docker-compose.yml or .env.
 
 # 2. Start the host-side TTS service (XTTS-v2, ~1.8 GB model
 #    downloaded on first run, cached at ~/.cache/voice-assistant/xtts/).
@@ -75,14 +95,21 @@ cd xtts-server && ./start.sh &        # uv handles deps; see its README
 # 3. Start the host-side desktop-agent (AppleScript / pyautogui bridge).
 cd desktop-agent && ./start.sh &      # same pattern
 
-# 4. Start mlx-whisper on the host (Apple Silicon) or any
-#    OpenAI-Whisper-compatible server.  Default expects
-#    http://localhost:18000.
-
-# 5. Start the orchestrator (FastAPI + frontend, in Docker).
-docker compose up -d
+# 4. Start the orchestrator (FastAPI + frontend, native uv venv).
+cd orchestrator && ./start.sh &      # same uv pattern as the others
 
 # Open http://localhost:8080
+```
+
+**Common task shortcuts** (requires `brew install go-task`):
+
+```bash
+task up         # start the orchestrator (launchd)
+task down       # stop it
+task logs       # tail orchestrator logs
+task health     # probe all backends at once
+task upgrade    # git pull + uv sync + restart
+task test       # run pytest (native uv venv)
 ```
 
 For a complete walk-through including macOS permissions
@@ -95,8 +122,8 @@ setup, see [`docs/deployment.md`](docs/deployment.md).
 voice-assistant/
 ├── orchestrator/          # FastAPI brain — agent loop, tools, storage
 │   ├── app/               # Source (see orchestrator/CLAUDE.md)
-│   ├── tests/             # pytest, 178 tests, runs in container
-│   └── Dockerfile
+│   ├── tests/             # pytest, 275 tests — `task test` (uv venv)
+│   └── start.sh           # native service entry (uv); Dockerfile = Linux path
 ├── desktop-agent/         # Host-side HTTP/WSS gateway for desktop automation
 ├── xtts-server/           # Host-side TTS service (Coqui XTTS-v2)
 ├── frontend/              # Browser PWA — wake-word, mic, UI, push
@@ -116,13 +143,13 @@ voice-assistant/
 │   image attach) │     TTS stream     │    storage)        │
 └─────────────────┘                    └─────────┬──────────┘
                                                  │
-   ┌──────────────────┬──────────────┬───────────┴───────────┐
-   │ mlx-whisper      │ LM Studio /  │ xtts-server           │
-   │ (host, :18000)   │ Ollama /     │ (host, :9876)         │
-   │ ASR              │ vLLM         │ TTS XTTS-v2 streaming │
-   │                  │ (host,:1234) │                       │
-   │                  │ text +vision │                       │
-   └──────────────────┴──────────────┴────────────┬──────────┘
+   ┌──────────────────────────────┬──────────────┴────────┐
+   │ LocalAI (host, :1240)        │ xtts-server           │
+   │ llama.cpp + whisper.cpp      │ (host, :9876)         │
+   │ ASR + LLM (text+vision+tools)│ TTS XTTS-v2 streaming │
+   │ or any OpenAI-compatible     │                       │
+   │ (Ollama / vLLM / mlx-whisper)│                       │
+   └──────────────────────────────┴───────────────┬───────┘
                                                   │
                                        ┌──────────┴──────────┐
                                        │ desktop-agent       │
@@ -165,6 +192,10 @@ Every default points at localhost:
 No telemetry, no cloud accounts, no LLM API keys.  The only secrets
 are local: `data/vapid_private.pem` (Web Push, auto-generated) and
 the `DESKTOP_TOKEN` shared secret (auto-generated; copy into env).
+
+## Related work
+
+[Open WebUI](https://github.com/open-webui/open-webui) — closest self-hosted alternative.
 
 ## License
 

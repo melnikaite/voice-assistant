@@ -11,13 +11,18 @@ from .db import HISTORY_RESUME_MAX_AGE_S, _conn, _lock
 # Write
 # ---------------------------------------------------------------------------
 
-def _start_session_sync(client: str | None, client_id: str | None) -> int:
+def _start_session_sync(
+    client: str | None,
+    client_id: str | None,
+    device_kind: str | None,
+) -> int:
     with _lock:
         c = _conn()
         try:
             cur = c.execute(
-                "INSERT INTO sessions(started_at, client, client_id) VALUES (?, ?, ?)",
-                (time.time(), client, client_id),
+                "INSERT INTO sessions(started_at, client, client_id, device_kind)"
+                " VALUES (?, ?, ?, ?)",
+                (time.time(), client, client_id, device_kind),
             )
             return cur.lastrowid  # type: ignore[return-value]
         finally:
@@ -27,8 +32,9 @@ def _start_session_sync(client: str | None, client_id: str | None) -> int:
 async def start_session(
     client: str | None = None,
     client_id: str | None = None,
+    device_kind: str | None = None,
 ) -> int:
-    return await asyncio.to_thread(_start_session_sync, client, client_id)
+    return await asyncio.to_thread(_start_session_sync, client, client_id, device_kind)
 
 
 # ---------------------------------------------------------------------------

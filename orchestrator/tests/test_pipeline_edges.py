@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.speaker import SpeakerAttribution
 from app.pipeline import MIN_DURATION_MS, Pipeline, SAMPLE_BYTES_PER_SECOND
 
 
@@ -75,6 +76,9 @@ class StubHooks:
         self._auth_until = time.time() + window_s
 
     async def cookie_profile_id(self):
+        return None
+
+    async def current_step_up_auth_until(self):
         return None
 
     def find(self, kind):
@@ -144,7 +148,7 @@ async def test_passphrase_only_short_circuits(hooks, make_agent_ctx):
     with patch("app.pipeline.transcribe",
                new=AsyncMock(return_value=("пароль янтарь", 50))), \
          patch.object(Pipeline, "_resolve_speaker",
-                      new=AsyncMock(return_value=("Eugene", None, pid))), \
+                      new=AsyncMock(return_value=SpeakerAttribution(mode="single", name="Eugene", profile_id=pid))), \
          patch("app.pipeline.run_agent", new=AsyncMock()) as agent:
         p = Pipeline(hooks=hooks)
         outcome = await p.run(

@@ -21,7 +21,7 @@ File:line citations are breadcrumbs accurate as of this commit, not contracts.
                                  │ RTC (mic up, TTS down)
                                  ▼
    ┌──────────────────────────────────────────────────────────┐
-   │ orchestrator  (Docker, network_mode: host, :8080)        │
+   │ orchestrator  (host, uv venv, launchd, :8080)            │
    │   FastAPI app                                            │
    │   ├─ ws.py            FSM, WebRTC bridge                 │
    │   ├─ pipeline.py      one turn end-to-end                │
@@ -33,22 +33,22 @@ File:line citations are breadcrumbs accurate as of this commit, not contracts.
    └────┬────────┬────────┬────────┬────────────────────────┬─┘
         │ HTTP   │ HTTP   │ HTTP   │ HTTP / reverse-WSS     │
         ▼        ▼        ▼        ▼                        ▼
-   ┌──────────┐ ┌──────┐ ┌─────────────┐ ┌──────────────────┐ ┌──────────────┐
-   │ mlx-     │ │ LM   │ │ xtts-server │ │ desktop-agent    │ │ DuckDuckGo / │
-   │ whisper  │ │Studio│ │  (host,     │ │  (host, :9877)   │ │ Open-Meteo / │
-   │ (host,   │ │(host,│ │   :9876)    │ │  AppleScript /   │ │ news (over   │
-   │ :18000)  │ │:1234)│ │  XTTS-v2    │ │  pyautogui /     │ │ internet)    │
-   │ ASR      │ │ LLM  │ │  streaming  │ │  screenshot      │ └──────────────┘
-   └──────────┘ └──────┘ └─────────────┘ └──────────────────┘
+   ┌─────────────────┐ ┌─────────────┐ ┌──────────────────┐ ┌──────────────┐
+   │ LocalAI         │ │ xtts-server │ │ desktop-agent    │ │ DuckDuckGo / │
+   │ (host, :1240)   │ │  (host,     │ │  (host, :9877)   │ │ Open-Meteo / │
+   │ whisper.cpp ASR │ │   :9876)    │ │  AppleScript /   │ │ news (over   │
+   │ + llama.cpp LLM │ │  XTTS-v2    │ │  pyautogui /     │ │ internet)    │
+   │ (text+vision)   │ │  streaming  │ │  screenshot      │ └──────────────┘
+   └─────────────────┘ └─────────────┘ └──────────────────┘
 ```
 
 | Component        | Runs where      | Why there                                                                                                       |
 |------------------|-----------------|-----------------------------------------------------------------------------------------------------------------|
 | `frontend/`      | Browser         | Wake-word + mic must live where the user is; Service Worker needs `https://` or `localhost`; no build step.     |
-| `orchestrator/`  | Docker (host net)| Reproducible build. Host networking required for WebRTC ICE — bridge candidates aren't routable. `docker-compose.yml:1-22`. |
+| `orchestrator/`  | Host (uv venv)  | Native uv service since 2026-06-12 (`orchestrator/start.sh`, launchd). WebRTC ICE binds host interfaces directly — no Docker port-proxy layer. `docker-compose.yml` remains the optional Linux-server path. |
 | `xtts-server/`   | Host (uv venv)  | PyTorch needs MPS/CUDA; macOS Docker can't pass through Apple GPU (3-5× slower in container). |
-| `mlx-whisper`    | Host            | MLX is Apple-only, needs direct Metal access. Any OpenAI-Whisper-compatible server works (env `WHISPER_URL`). |
-| LLM server       | Host            | Default LM Studio. Anything OpenAI-compatible (Ollama, vLLM, llama.cpp, cloud) works — see §8.                  |
+| ASR server       | Host            | Default LocalAI (whisper.cpp Metal/CUDA, same server as the LLM). Any OpenAI-Whisper-compatible server works (env `WHISPER_URL` — e.g. mlx-whisper, faster-whisper). |
+| LLM server       | Host            | Default LocalAI :1240 (llama.cpp Metal/CUDA; also serves whisper.cpp ASR). Anything OpenAI-compatible (Ollama, vLLM, llama.cpp, LM Studio, cloud) works — see §8. |
 | `desktop-agent/` | Host (uv venv)  | AppleScript/Apple Events need GUI session + Accessibility/Automation grants; pyautogui needs display. Not reachable from Docker. |
 
 Orchestrator never talks to the user directly. Browser is the only client; everything else is a backend it composes.
@@ -119,6 +119,17 @@ Declared per tool; gated in `agent._execute_one`:
 | `high_write`  | Requires `ctx.is_authenticated` (passphrase within auth window, default 5 min). Otherwise enqueued in `pending_actions`. | `memory_write`, `update_settings`, "send", "delete", anything destructive. |
 
 `computer_use` is `risk="read"` because it never mutates — its three-layer defence (§5) refuses destructive scripts outright. The `desktop` tool is the explicit mutation path: inspects its arguments and chooses risk per call.
+
+### Step-up gate (`private=True`, #55)
+
+Orthogonal to the risk levels above: a tool flagged `@tool(..., private=True)` reads data sensitive enough to need a **second factor that isn't a spoken word** (so a bystander can't shoulder-surf it). `my_history` is the first such tool.
+
+When a `private` tool is called without an active grant, `agent._execute_one`:
+1. Mints a single-use token in `step_up_grants` bound to `(profile_id, client_id)`.
+2. Web-Pushes a "tap to confirm" notification to the speaker's devices (token rides the encrypted payload — never a URL).
+3. Returns "tap your device to confirm, then ask again" and ends the turn.
+
+The user taps → the service worker POSTs the token to `/api/step-up/approve` → the orchestrator consumes the grant and elevates **only** the originating session (verified by `client_id` + `profile_id`) → a `step_up_granted` WS event opens a 5-min window so the re-asked turn carries `ctx.step_up_auth=True`. Distinct from the passphrase window (`high_write`): step-up proves *device possession*, not a *shared secret*.
 
 ---
 
@@ -212,20 +223,24 @@ All SQL runs on `asyncio.to_thread`, so each pooled worker caches one connection
 
 ### Tables
 
-Defined in `storage/schema.py:16-272`:
+Defined in `storage/schema.py`:
 
-| Table                | Purpose                                                                                   |
-|----------------------|-------------------------------------------------------------------------------------------|
-| `sessions`           | One row per WebSocket connection. `client_id` is the stable per-browser identifier.       |
-| `utterances`         | One row per turn — transcript, tool used, response, ASR/LLM ms, embedding BLOB. Source of semantic memory. |
-| `reminders`          | Future-fire reminders; `fired` + `delivered` flags drive the scheduler.                   |
-| `pending_actions`    | Queue of `high_write` tool calls deferred for passphrase approval. TTL via `expires_at`.  |
-| `voice_messages`     | Voicemail audio + transcripts. Inbound (`to_profile_id`) and outbound by direction.       |
-| `speaker_profiles`   | Enrolled household members: name + d-vector centroid + per-speaker TTS voice override.    |
-| `custom_voices`      | User-recorded XTTS-cloning reference WAVs.                                                |
-| `push_subscriptions` | Web Push subscriptions (one per browser/device).                                          |
-| `token_usage`        | Per-LLM-call row — prompt, completion, reasoning tokens, attributed to `tool_name` + `client_id`. Feeds `/api/stats`. |
-| `auth_sessions`      | UI cookie-session store (HttpOnly, server-side revocable).                                |
+| Table                  | Purpose                                                                                   |
+|------------------------|-------------------------------------------------------------------------------------------|
+| `sessions`             | One row per WebSocket connection. `client_id` is the stable per-browser identifier.       |
+| `utterances`           | One row per turn — transcript, tool used, response, ASR/LLM ms, embedding BLOB. Source of semantic memory + the per-tool latency/error figures in `/api/stats`. |
+| `reminders`            | Future-fire reminders; `fired` + `delivered` flags drive the scheduler.                   |
+| `pending_actions`      | Queue of `high_write` tool calls deferred for passphrase approval. TTL via `expires_at`.  |
+| `voice_messages`       | Voicemail audio + transcripts. Inbound (`to_profile_id`) and outbound by direction.       |
+| `speaker_profiles`     | Enrolled household members: name + d-vector centroid + per-speaker TTS voice override.    |
+| `custom_voices`        | User-recorded XTTS-cloning reference WAVs.                                                |
+| `push_subscriptions`   | Web Push subscriptions (one per browser/device).                                          |
+| `token_usage`          | Per-LLM-call row — prompt, completion, reasoning tokens, attributed to `tool_name` + `client_id`. Feeds `/api/stats`. |
+| `auth_sessions`        | UI cookie-session store (HttpOnly, server-side revocable).                                |
+| `items`, `categories`, `category_shares` | Personal item store: links/notes/media + hierarchical folders + household sharing grants. |
+| `profile_devices`      | (#50) Maps a `speaker_profile` → the desktop-agent (`device_uid`) that runs its device-tier tools; optional WoL MAC/IP + `is_default`. |
+| `device_pairing_codes` | (#50) Ephemeral single-use 6-digit codes (CSPRNG) binding an agent to a profile over reverse-WSS. 5-min TTL. |
+| `step_up_grants`       | (#55) Push-to-device approval tokens for `private=True` tools. Single-use, 90-s TTL, stores `(profile_id, client_id)` so only the requesting session is elevated. |
 
 ### TTLs
 
@@ -233,6 +248,8 @@ Defined in `storage/schema.py:16-272`:
 |------------------------|--------|----------------------------------------------------------------|
 | `auth_sessions`        | 5 min  | read-path filter on `expires_at`                               |
 | `pending_actions`      | 5 min  | read-path filter on `expires_at`                               |
+| `device_pairing_codes` | 5 min  | read-path filter + purge-on-create                            |
+| `step_up_grants`       | 90 s   | single-use (deleted on consume) + `purge_step_up_grants`      |
 | `items` (deleted)      | 7 days | scheduled `purge_expired_trash` every 6 h                      |
 | `utterances`, `token_usage` | —  | append-only, no GC                                             |
 
@@ -265,13 +282,14 @@ Don't add one for one-off settings (use `user_files.py` JSON files) or small cac
 | `LLM_VISION_URL`   | Vision endpoint override (defaults to `LLM_URL`).                             |
 | `LLM_VISION_MODEL` | Vision model override (defaults to `LLM_MODEL`).                              |
 
-Leave the split commented out and Gemma 4 (multimodal) on LM Studio serves both. Override only when you want different providers for text vs vision. `chat()` accepts `endpoint_url=` and `model=` per-call (`llm_utils.py:146-148`); `vision.py` routes vision calls to `LLM_VISION_URL` automatically. `chat_stream()` is the streaming counterpart, used by `web_search` for sentence-by-sentence TTS (`llm_utils.py:219-319`).
+Leave the split commented out and Gemma 4 (multimodal) on LocalAI serves both. Override only when you want different providers for text vs vision. `chat()` accepts `endpoint_url=` and `model=` per-call (`llm_utils.py:146-148`); `vision.py` routes vision calls to `LLM_VISION_URL` automatically. `chat_stream()` is the streaming counterpart, used by `web_search` for sentence-by-sentence TTS (`llm_utils.py:219-319`).
 
 ### Compatibility matrix
 
 | Server          | Streaming      | Tool calls | Notes                                                                          |
 |-----------------|---------------|-----------|--------------------------------------------------------------------------------|
-| LM Studio       | yes           | yes       | Default. Reports `usage` in final SSE chunk via `stream_options.include_usage`. |
+| LocalAI         | yes           | yes       | Default (:1240, llama.cpp + whisper.cpp backends). Set `LLM_REASONING_EFFORT=none` — Gemma's adaptive thinking otherwise fires sporadically (seconds of CoT before a voice reply). |
+| LM Studio       | yes           | yes       | Works (it's llama.cpp underneath). Reports `usage` in final SSE chunk via `stream_options.include_usage`. |
 | Ollama          | yes           | yes (recent) | `LLM_URL=http://localhost:11434`. Models without tool support fall back to free-text + parse. |
 | vLLM            | yes           | yes       | Run an OpenAI-format model (Llama 3.1, Qwen, Mistral).                         |
 | llama.cpp       | yes           | model-dependent | `llama-server` binary; same `/v1/...` shape.                              |
@@ -305,7 +323,15 @@ Resolution for `get_agent(None)` (`desktop_client.py:250-272`):
 2. Most-recently-reachable agent (highest `last_seen`).
 3. First in env order.
 
-Tools taking an `agent_id` argument (LLM-visible) route to a named agent; omitting it selects the default. Frontend's "Connected devices" panel reads `/api/agents` (`main.py:997-1036`).
+Tools taking an `agent_id` argument (LLM-visible) route to a named agent; omitting it selects the default. Frontend's "Connected devices" panel reads `/api/agents`.
+
+### Personal-device routing + Wake-on-LAN (#50)
+
+For an *identified speaker*, device-tier tools shouldn't hit the default agent — they should hit **that person's own machine**. `device_router.resolve_agent_id_for_profile(profile_id, device_kind)` (`device_router.py`) looks up `profile_devices`, returns the paired `device_uid`, and `agent._execute_one` injects it as `agent_id` when the LLM didn't name one. No pairing → a friendly "no personal device" reply. Pairing happens over reverse-WSS with an ephemeral CSPRNG `device_pairing_codes` entry (no Settings UI round-trip).
+
+If the paired agent is stale (`last_seen` older than `ONLINE_TIMEOUT_S`) and a `wol_mac` is configured, the router fires a Wake-on-LAN magic packet (`send_wol`) and returns the `agent_id` immediately — the tool call wakes the box or fails with a transport error. WoL targets are validated as **LAN/broadcast only** (`ipaddress.is_global` rejected) so a stored `wol_target_ip` can't become an arbitrary-host UDP egress primitive.
+
+Lock-aware: tools declaring `locked_compat="needs_unlock"` are refused when the agent reports `locked=True`; the default `"always"` runs regardless (AppleScript/COM/D-Bus don't need an active UI session).
 
 ### Capability cache (TTL 60 s, polled every 30 s)
 
@@ -372,8 +398,8 @@ Everything important runs on `localhost`:
 | Service          | Local? | Falls back to                                                            |
 |------------------|--------|--------------------------------------------------------------------------|
 | Wake-word        | yes (browser ONNX) | —                                                              |
-| ASR              | yes (mlx-whisper)  | Any OpenAI-Whisper-compatible HTTP endpoint                    |
-| LLM (text+vision)| yes (LM Studio default) | Any OpenAI-compatible endpoint                            |
+| ASR              | yes (LocalAI whisper.cpp) | Any OpenAI-Whisper-compatible HTTP endpoint             |
+| LLM (text+vision)| yes (LocalAI default) | Any OpenAI-compatible endpoint                              |
 | TTS              | yes (XTTS-v2)      | —                                                              |
 | Semantic memory  | yes (fastembed MiniLM-L12) | Downloads once (~220 MB ONNX), then offline            |
 | Speaker ID       | yes (resemblyzer)  | —                                                              |
@@ -401,11 +427,16 @@ One-line rationale per decision.
 - **Vanilla JS over React/Vue.** Static files via FastAPI `StaticFiles` (`main.py:1056`). No build step, edit-refresh works without a bundler. CDN-vendored libraries (`frontend/vendor/`) live alongside source so the whole thing works offline.
 - **Tool decorator + auto-discovery over manifest.** `@tool(...)` + `pkgutil.iter_modules` (`tools/__init__.py:24-33`). Adding a tool = drop a file, restart. A manifest would need to stay in sync with code anyway.
 - **Three-layer read-only defence over single allowlist.** Generator prompt + static substring/regex classifier + vision-loop click filter (§5). Each layer independent; bypassing one doesn't bypass the others. LLM-as-judge classifiers add another round-trip + another LLM to trust.
-- **LM Studio default but provider-agnostic.** OpenAI-compatible `/v1/chat/completions` is the lingua franca; the orchestrator only sees that shape. Endpoint URL + model are env knobs.
+- **Orchestrator native via uv, Docker demoted to the optional Linux path (2026-06-12).** The original rationale for Docker (reproducible build, host networking for WebRTC ICE) aged out: `uv.lock` gives reproducibility, and on macOS "host networking" is actually an OrbStack/Docker-Desktop proxy layer in front of every port — one more failure mode (helper processes own the sockets) for zero benefit. Native = WebRTC binds real interfaces, one service model for the whole stack (uv venv + LaunchAgent), tests run with plain `uv run pytest`, and the install story needs no Docker at all. `docker-compose.yml` stays for headless Linux servers.
+- **LocalAI default (was LM Studio) but provider-agnostic.** OpenAI-compatible `/v1/chat/completions` is the lingua franca; the orchestrator only sees that shape. Endpoint URL + model are env knobs. LocalAI won the default slot 2026-06-12 because one brew-installable server covers LLM + ASR on Metal AND the Linux/CUDA distribution path (spike: `docs/spikes/2026-06-12-localai-spike.md`).
 - **WebRTC for audio over binary WebSocket frames.** RTCPeerConnection both ways. Browser's WebRTC voice engine sees TTS as reference audio and runs AEC3 — speaker→mic feedback is cancelled for free, enabling full-duplex barge-in. WS stays as signalling + JSON-events (`ws.py:1-34`).
 - **Host xtts-server over in-container TTS.** PyTorch reaches MPS/CUDA; container can't (`docker-compose.yml:128-143`). 3-5× faster inference, RTF ~0.3 vs ~4.
 - **Reverse-WSS over orchestrator-initiated VPN.** Agent dials orchestrator (`agent_proxy.py`, §9). One env flip and the home agent serves a phone-tethered orchestrator across a coffee-shop NAT. Tailscale is still recommended for the static case (`desktop-agent/README.md:183-189`).
 - **Voice ID as auth, passphrase as escalation.** Speaker recognition (resemblyzer d-vectors) identifies WHO without a credential exchange — enough for `read` and `low_write`. `high_write` requires the passphrase to open a 5-minute auth window (`pipeline.py:60`). Passphrase-on-every-command defeats the "voice is the UI" point; voice-ID-only fails on guests.
+- **Step-up via push-to-device, not a spoken OTP (#55).** Reading private data (`my_history`) needs a second factor a bystander can't overhear. A spoken/heard OTP leaks to anyone in the room; instead we Web-Push a "tap to confirm" to the speaker's own device. Proves *possession of the phone*, not a shared secret. Token travels only in the encrypted push payload + POST body — never a URL — and elevates only the requesting session (§4 step-up gate).
+- **Outer Basic Auth installed at app construction, not in lifespan.** Starlette builds its middleware stack on the first request, which is *after* lifespan startup — so `add_middleware` from inside lifespan silently never wraps requests (or raises). The anti-scanner "door before the house" (#43) is therefore added at module-construction time, reading instance settings synchronously (it already requires a restart to toggle).
+- **Observability from existing rows, no new telemetry pipeline (#46).** `/api/stats` aggregates `token_usage` (cost/tokens) and `utterances` (per-tool latency + error rate) plus a live in-process snapshot (sessions, agents, uptime). No metrics daemon, no external sink — consistent with offline-first; the dashboard is owner-gated behind the `va_session` cookie.
+- **Mixed-utterance attribution via windowed-partials clustering, not diarization (#59).** resemblyzer already computes ~1.6 s window embeddings before averaging them into the utterance d-vector; clustering those windows (seeded 2-means, min-pairwise-cosine homogeneity gate `SPEAKER_MIXED_HOMOGENEITY=0.70`, with blip / same-profile / centroid-proximity guards) detects "two voices in one VAD segment" at zero new dependencies. Empirically: same-voice min-pairwise ≈ 0.69, cross-voice ≈ 0.41 — the guards absorb threshold over-fires. Mixed turns carry no `profile_id`: the cookie fallback is muted, the passphrase auth window is NOT inherited, memory context goes household-wide, and device-tier tools ask whose device instead of guessing (`clarify.which_device`); the existing continuation window catches the answer as a fresh single-speaker turn with its own clean speaker-ID. Real diarization (LocalAI `/v1/audio/diarization`) is Linux-only today — it slots in behind the same `_resolve_speaker` seam later (see `docs/spikes/2026-06-12-localai-spike.md`).
 
 ---
 

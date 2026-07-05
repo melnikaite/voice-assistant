@@ -59,13 +59,15 @@ async def transcribe(
     """
     Send PCM bytes to the whisper server, return ``(text, elapsed_ms)``.
 
-    Note on language detection: the server we run (vLLM Whisper) only
-    accepts ``response_format`` ∈ {``json``, ``text``} — ``verbose_json``
-    returns 422 (vLLM issue #14818, marked stale).  So no per-utterance
-    detected-language code comes back from Whisper.  Downstream callers
-    that need the language do their own (e.g. ``web_search`` runs a tiny
-    Gemma classification on the query before deciding whether to
-    translate it).
+    We use ``response_format=json`` (the default when omitted), which
+    returns only ``{"text": "..."}`` — no language code, no timecodes.
+    The backend (mlx-openai-server fork on :18000) also supports
+    ``verbose_json`` which adds ``language`` (ISO 639-1) and per-segment
+    timecodes, but we don't need those here: timecodes are out of scope
+    for the voice pipeline, and using plain json keeps the integration
+    compatible with any OpenAI-Whisper-compatible server.  Callers that
+    need the language (e.g. ``web_search``) run their own detection via
+    a small Gemma classification pass on the transcript.
     """
     wav = _pcm_to_wav(pcm)
     files = {"file": ("audio.wav", wav, "audio/wav")}

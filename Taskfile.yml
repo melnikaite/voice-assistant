@@ -1,0 +1,106 @@
+# Taskfile.yml — voice-assistant task runner
+# https://taskfile.dev  Install: brew install go-task
+#
+# Covers the full local-dev lifecycle:
+#   task wizard   — first-run setup (probes backends, writes .env)
+#   task up       — start orchestrator (native, launchd)
+#   task health   — check all backends
+#   task upgrade  — pull → re-sync deps → restart
+#   task test     — pytest (native uv venv)
+#
+# All services run natively via uv + LaunchAgents on macOS.  The
+# docker-compose path remains as the optional Linux-server variant:
+# `docker compose up -d` works as before (see docker-compose.yml).
+
+version: "3"
+
+vars:
+  ORCH_UNIT: com.voiceassistant.orchestrator
+  ORCH_PLIST: "{{.HOME}}/Library/LaunchAgents/com.voiceassistant.orchestrator.plist"
+  ORCHESTRATOR_PORT: "8080"
+  BACKEND_PORT: "1240" # LocalAI — LLM + ASR
+  TTS_PORT: "9876"
+  AGENT_PORT: "9877"
+
+tasks:
+  # ── Meta ──────────────────────────────────────────────────────────
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  # ── Orchestrator lifecycle (native, launchd) ───────────────────────
+  up:
+    desc: Start the orchestrator (LaunchAgent; loads it on first use)
+    cmds:
+      - launchctl load {{.ORCH_PLIST}} 2>/dev/null || launchctl kickstart gui/$(id -u)/{{.ORCH_UNIT}}
+      - echo "orchestrator → http://localhost:{{.ORCHESTRATOR_PORT}}"
+
+  down:
+    desc: Stop the orchestrator (and keep it stopped until `task up`)
+    cmds:
+      - launchctl unload {{.ORCH_PLIST}}
+
+  restart:
+    desc: Restart the orchestrator
+    cmds:
+      - launchctl kickstart -k gui/$(id -u)/{{.ORCH_UNIT}}
+
+  logs:
+    desc: Tail orchestrator logs  (Ctrl-C to stop)
+    cmds:
+      - tail -f {{.HOME}}/Library/Logs/voice-assistant/orchestrator.log
+
+  run:
+    desc: Run the orchestrator in the foreground (dev; stop launchd one first)
+    dir: orchestrator
+    cmds:
+      - ./start.sh
+
+  # ── Setup & upgrade ────────────────────────────────────────────────
+  wizard:
+    desc: Interactive first-run setup wizard
+    cmds:
+      - bash scripts/wizard.sh
+
+  upgrade:
+    desc: Pull latest changes, re-sync deps, restart
+    cmds:
+      - git pull --ff-only
+      - cd orchestrator && UV_PYTHON_PREFERENCE=only-managed uv sync
+      - launchctl kickstart -k gui/$(id -u)/{{.ORCH_UNIT}}
+      - echo "upgrade complete → http://localhost:{{.ORCHESTRATOR_PORT}}"
+
+  # ── Health & observability ─────────────────────────────────────────
+  health:
+    desc: Check all backend health (LocalAI · TTS · desktop-agent · orchestrator)
+    cmds:
+      - bash scripts/health.sh
+    silent: true
+
+  # ── Tests ─────────────────────────────────────────────────────────
+  test:
+    desc: Run the orchestrator pytest suite (native uv venv)
+    dir: orchestrator
+    cmds:
+      - UV_PYTHON_PREFERENCE=only-managed uv run --extra test python -m pytest tests -q
+
+  test:one:
+    desc: Run a single test — TEST=path::name
+    dir: orchestrator
+    cmds:
+      - UV_PYTHON_PREFERENCE=only-managed uv run --extra test python -m pytest tests/{{.TEST}} -v
+
+  # ── Host-side services ─────────────────────────────────────────────
+  tts:start:
+    desc: Start the XTTS-v2 TTS server (host-side, :9876)
+    dir: xtts-server
+    cmds:
+      - ./start.sh
+
+  agent:start:
+    desc: Start the desktop-agent (host-side, :9877)
+    dir: desktop-agent
+    cmds:
+      - ./start.sh

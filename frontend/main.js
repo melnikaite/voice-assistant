@@ -50,6 +50,11 @@ const attachThumbEl = document.querySelector('#attach-thumb');
 const attachMetaEl = document.querySelector('#attach-meta');
 const attachClearEl = document.querySelector('#attach-clear');
 
+// Live stream panel refs — null-safe; panel may not exist in older HTML.
+const streamPanelEl = document.querySelector('#stream-panel');
+const streamImgEl   = document.querySelector('#stream-img');
+const streamStopEl  = document.querySelector('#stream-stop');
+
 // ---- Sound cues ----
 let soundCtx = null;
 function ensureSoundCtx() {
@@ -389,6 +394,23 @@ async function startWebRtc() {
 }
 
 // ---------------------------------------------------------------------------
+// Toast — lightweight ephemeral status chip that fades out.
+// ---------------------------------------------------------------------------
+function _showToast(text, durationMs = 3000) {
+  let t = document.querySelector('#va-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'va-toast';
+    t.className = 'va-toast';
+    document.body.appendChild(t);
+  }
+  t.textContent = text;
+  t.classList.add('va-toast-visible');
+  clearTimeout(t._hideTimer);
+  t._hideTimer = setTimeout(() => t.classList.remove('va-toast-visible'), durationMs);
+}
+
+// ---------------------------------------------------------------------------
 // WS message handler — signalling answers + state events.
 // ---------------------------------------------------------------------------
 async function onWsMessage(ev) {
@@ -474,6 +496,32 @@ async function onWsMessage(ev) {
       if (msg.target_agent) _markAgentActive(msg.target_agent);
       break;
     }
+    case 'ptt_trigger':
+      // Global hotkey from the desktop-agent (via /api/hotkey/ptt).
+      // Toggle PTT: if inactive, start; if already recording, stop.
+      log(`ptt_trigger: hold_ms=${msg.hold_ms ?? 10000}`);
+      onHotkeyPttTrigger(msg.hold_ms ?? 10000);
+      break;
+    case 'stream_started': {
+      // A live-streaming tool (stream_camera / stream_tab) started a
+      // MJPEG feed.  Show the stream panel and point the <img> at the
+      // proxy URL — the browser handles multipart/x-mixed-replace
+      // natively, painting each JPEG frame as it arrives.
+      const streamPanel = document.getElementById('stream-panel');
+      const streamImg = document.getElementById('stream-img');
+      const streamLabel = document.getElementById('stream-label');
+      if (streamPanel && streamImg) {
+        streamImg.src = msg.url;
+        if (streamLabel) {
+          streamLabel.textContent = msg.source === 'camera'
+            ? i18n('stream.label_camera')
+            : i18n('stream.label_tab');
+        }
+        streamPanel.style.display = 'block';
+        log(`stream_started: source=${msg.source} url=${msg.url}`);
+      }
+      break;
+    }
     case 'response':
       // Display only — TTS audio arrives via the RTC track, not over WS.
       responseEl.textContent = msg.text;
@@ -525,6 +573,14 @@ async function onWsMessage(ev) {
       // pending list since approve actions will now succeed.
       log(`auth: voice window opened for profile=${msg.profile_id}`);
       if (typeof loadPending === 'function') loadPending();
+      break;
+    }
+    case 'step_up_granted': {
+      // Push-to-device step-up approval was tapped.  Show a toast so
+      // the user knows they can re-ask the private query.
+      const windowMin = Math.round((msg.window_s || 300) / 60);
+      log(`step_up_granted: auth window ${windowMin} min`);
+      _showToast(i18n('step_up.granted', { min: windowMin }), 4000);
       break;
     }
     case 'attach_image_ack': {
@@ -933,6 +989,16 @@ if (attachClearEl) {
   attachClearEl.addEventListener('click', detachImage);
 }
 
+// Stream stop button — clears <img> src, which closes the HTTP connection
+// and stops the MJPEG feed on the desktop-agent side.
+if (streamStopEl && streamImgEl && streamPanelEl) {
+  streamStopEl.addEventListener('click', () => {
+    streamImgEl.src = '';
+    streamPanelEl.style.display = 'none';
+    log('stream: stopped by user');
+  });
+}
+
 // Drag-drop anywhere on the document — capture image, swallow event.
 // We intentionally use document-level listeners (not just the attach
 // area) so the user can drop on the page without aiming.  Drop on
@@ -1001,6 +1067,10 @@ function startContinuationCountdown(timeoutS) {
 }
 
 let pttActive = false;
+// Auto-release timer set by the global hotkey PTT trigger.
+// Cancelled if the user manually ends PTT before the timeout.
+let _hotkeyPttTimer = null;
+
 function pttStart() {
   if (pttActive || !ws || ws.readyState !== WebSocket.OPEN) return;
   pttActive = true;
@@ -1012,6 +1082,29 @@ function pttEnd() {
   pttActive = false;
   pttBtn.classList.remove('pressed');
   ws.send(JSON.stringify({ type: 'ptt_end' }));
+  // Cancel any pending hotkey auto-release — user ended manually.
+  if (_hotkeyPttTimer !== null) {
+    clearTimeout(_hotkeyPttTimer);
+    _hotkeyPttTimer = null;
+  }
+}
+
+// Server-initiated PTT trigger (global hotkey via desktop-agent).
+// Toggle behaviour: first message starts, second stops, or auto-release
+// fires after hold_ms milliseconds.
+function onHotkeyPttTrigger(holdMs) {
+  if (pttActive) {
+    // Second trigger = manual release.
+    pttEnd();
+  } else {
+    pttStart();
+    // Schedule auto-release.
+    if (_hotkeyPttTimer !== null) clearTimeout(_hotkeyPttTimer);
+    _hotkeyPttTimer = setTimeout(() => {
+      _hotkeyPttTimer = null;
+      pttEnd();
+    }, holdMs || 10000);
+  }
 }
 
 startBtn.addEventListener('click', start);
@@ -1463,10 +1556,63 @@ async function loadStats(range) {
 }
 
 function renderStats(data) {
+  renderSystemHealth(data.system || null);
   renderCostSummary(data);
   renderDailyChart(data.daily || []);
   renderPerToolChart(data.per_tool || []);
   renderPerUserChart(data.per_user || []);
+  renderToolPerfTable(data.tool_perf || []);
+}
+
+// ── System health strip ───────────────────────────────────────────────
+
+function _fmtUptime(s) {
+  if (!s && s !== 0) return '—';
+  if (s < 60)    return `${s}s`;
+  if (s < 3600)  return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
+
+function renderSystemHealth(sys) {
+  const strip = document.querySelector('#stats-system');
+  if (!strip) return;
+  if (!sys) { strip.style.display = 'none'; return; }
+  strip.style.display = 'flex';
+
+  const sessEl   = document.querySelector('#sys-sessions');
+  const agentEl  = document.querySelector('#sys-agents');
+  const uptimeEl = document.querySelector('#sys-uptime');
+  const turnsEl  = document.querySelector('#sys-turns');
+
+  if (sessEl)   sessEl.textContent   = String(sys.active_sessions ?? '—');
+  if (agentEl)  agentEl.textContent  =
+    sys.agents_total != null
+      ? `${sys.agents_reachable}/${sys.agents_total}`
+      : '—';
+  if (uptimeEl) uptimeEl.textContent = _fmtUptime(sys.uptime_s);
+  if (turnsEl)  turnsEl.textContent  = String(sys.turns_today ?? '—');
+}
+
+// ── Tool performance table ────────────────────────────────────────────
+
+function renderToolPerfTable(rows) {
+  const card = document.querySelector('#tool-perf-card');
+  const body = document.querySelector('#tool-perf-body');
+  if (!card || !body) return;
+  if (!rows || !rows.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+
+  body.innerHTML = rows.map((r) => {
+    const errClass = (r.errors > 0) ? ' class="tool-perf-err"' : '';
+    const errRate  = r.error_rate > 0 ? ` (${(r.error_rate * 100).toFixed(0)}%)` : '';
+    return `<tr>
+      <td>${_truncateLabel(r.tool_name || '(unknown)', 28)}</td>
+      <td>${r.calls}</td>
+      <td>${r.avg_ms ? r.avg_ms + ' ms' : '—'}</td>
+      <td${errClass}>${r.errors}${errRate}</td>
+    </tr>`;
+  }).join('');
 }
 
 function renderCostSummary(data) {

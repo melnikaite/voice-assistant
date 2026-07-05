@@ -255,6 +255,24 @@ export const CATALOG = {
   'stats.chartjs_unavailable': { en: 'Chart.js not loaded — charts unavailable.', ru: 'Chart.js не загрузился — графики недоступны.', de: 'Chart.js nicht geladen — Diagramme nicht verfügbar.' },
   // {n} = count of remaining clients in per-user chart
   'stats.more_clients':        { en: '{n} more clients', ru: 'ещё клиентов ({n})', de: 'noch {n} Kunden' },
+  // Step-up auth UI
+  'step_up.granted': {
+    en: '✓ Confirmed ({min} min window). Ask again.',
+    ru: '✓ Подтверждено (окно {min} мин). Повтори запрос.',
+    de: '✓ Bestätigt ({min} Min. Fenster). Frag erneut.',
+  },
+
+  // System health strip
+  'stats.sys_sessions':        { en: 'Active sessions', ru: 'Сессий', de: 'Sitzungen' },
+  'stats.sys_agents':          { en: 'Agents',          ru: 'Агентов', de: 'Agenten' },
+  'stats.sys_uptime':          { en: 'Uptime',          ru: 'Аптайм',  de: 'Laufzeit' },
+  'stats.sys_turns':           { en: 'Turns today',     ru: 'Запросов за день', de: 'Anfragen heute' },
+  // Tool performance table headers
+  'stats.label_tool_perf':     { en: 'Tool performance',  ru: 'Производительность инструментов', de: 'Tool-Performance' },
+  'stats.perf_tool':           { en: 'Tool',     ru: 'Инструмент', de: 'Tool'   },
+  'stats.perf_calls':          { en: 'Calls',    ru: 'Вызовов',    de: 'Aufrufe' },
+  'stats.perf_avg_ms':         { en: 'Avg ms',   ru: 'Сред. мс',   de: 'Ø ms'   },
+  'stats.perf_errors':         { en: 'Errors',   ru: 'Ошибок',     de: 'Fehler' },
 
   // ── Auth status messages ─────────────────────────────────────────
   'auth.profile_number':       { en: 'profile #{id}',          ru: 'профиль #{id}',            de: 'Profil #{id}' },
@@ -444,6 +462,11 @@ export const CATALOG = {
   'items.auto_sort_apply':  { en: 'Apply',            ru: 'Применить',          de: 'Anwenden' },
   'items.auto_sort_cancel': { en: 'Cancel',           ru: 'Отмена',             de: 'Abbrechen' },
   'items.error':            { en: 'Error',            ru: 'Ошибка',             de: 'Fehler' },
+
+  // ── Live stream panel ───────────────────────────────────────────────
+  'stream.stop':        { en: 'Stop',         ru: 'Стоп',          de: 'Stopp' },
+  'stream.label_camera': { en: '📷 Live — Camera', ru: '📷 Эфир — Камера', de: '📷 Live — Kamera' },
+  'stream.label_tab':    { en: '🖥 Live — Tab',   ru: '🖥 Эфир — Вкладка', de: '🖥 Live — Tab' },
 };
 
 

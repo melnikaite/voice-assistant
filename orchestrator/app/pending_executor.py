@@ -37,7 +37,12 @@ log = logging.getLogger(__name__)
 POLL_INTERVAL_S = 3.0
 
 _task: asyncio.Task | None = None
-_stopping = asyncio.Event()
+# Created fresh in start() so it binds to the CURRENT event loop.  A
+# module-level asyncio.Event() binds to the first loop that touches it
+# (asyncio mixin caches the loop), which breaks across loops — e.g. each
+# TestClient(app) spins a new loop, and reusing a stale Event raises
+# "bound to a different event loop".  None until start() runs.
+_stopping: asyncio.Event | None = None
 
 
 async def _process_one(row: dict) -> None:
@@ -119,10 +124,10 @@ async def _loop() -> None:
 
 def start() -> None:
     """Launch the background executor.  Idempotent."""
-    global _task
+    global _task, _stopping
     if _task and not _task.done():
         return
-    _stopping.clear()
+    _stopping = asyncio.Event()  # bind to the current running loop
     _task = asyncio.create_task(_loop())
 
 
@@ -130,4 +135,5 @@ def stop() -> None:
     """Signal the executor to exit at its next sweep boundary.  The task
     isn't awaited here — callers from ``lifespan`` shutdown can await it
     if they need to confirm a clean exit before tearing down the loop."""
-    _stopping.set()
+    if _stopping is not None:
+        _stopping.set()
