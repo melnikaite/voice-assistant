@@ -6,6 +6,8 @@ speaker ID, personal item store, and desktop automation.  Runs entirely
 on your own hardware; no cloud API keys; works without internet for
 most tasks.
 
+![Main UI](docs/img/main-ui.png)
+
 > **Status**: actively developed.  Single-user / single-household scope
 > by design (one Mac + browser).  Multi-agent mode supports a primary
 > Mac plus remote agents (e.g. a work PC) over Tailscale.
