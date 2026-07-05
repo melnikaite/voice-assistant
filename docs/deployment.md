@@ -271,6 +271,7 @@ For NAT traversal (work PC behind corporate firewall), the recommended path is T
 macOS launchd templates:
 
 ```bash
+cd orchestrator && ./install-autostart.sh
 cd xtts-server && ./install-autostart.sh
 cd desktop-agent && ./install-autostart.sh
 ```
@@ -279,7 +280,9 @@ Each drops a plist into `~/Library/LaunchAgents/`, wires auto-restart, points st
 
 For Linux, write a systemd user unit pointing at `./start.sh` in each directory.
 
-The orchestrator itself is Docker — `docker compose up -d` in your boot script, or `restart: unless-stopped` (already set at line 223) plus Docker Desktop / `dockerd` on boot.
+After installing the orchestrator agent, `task up` / `task down` / `task restart` control it.  Upgrading code does **not** restart a running daemon — `task upgrade` bundles pull + `uv sync` + restart.  To remove, run `./uninstall-autostart.sh` **before** deleting the checkout, or launchd will keep respawning a missing binary.
+
+On a Linux server the docker-compose variant applies instead: `docker compose up -d` in your boot script, with `restart: unless-stopped` already set.
 
 ## 13. Backup / migration
 
@@ -291,9 +294,9 @@ Everything stateful lives under `data/`:
 - `custom_voices/` — user-recorded XTTS voice references.
 
 ```bash
-docker compose stop orchestrator
+task down                       # docker compose stop orchestrator on Linux
 tar -czf voice-assistant-backup-$(date +%Y%m%d).tar.gz data/
-docker compose start orchestrator
+task up                         # docker compose start orchestrator on Linux
 ```
 
 Restore: stop, untar, start. Schema is idempotent (every migration is `CREATE IF NOT EXISTS`); a backup from an older version gains new columns on first boot of the new orchestrator.

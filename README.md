@@ -114,6 +114,30 @@ task upgrade    # git pull + uv sync + restart
 task test       # run pytest (native uv venv)
 ```
 
+**Autostart / daemon lifecycle.**  Every service runs as a launchd
+LaunchAgent (`com.voiceassistant.*`) that starts at login and
+auto-restarts on crash:
+
+```bash
+# install the daemons (writes a plist to ~/Library/LaunchAgents/ and loads it)
+(cd orchestrator   && ./install-autostart.sh)
+(cd xtts-server    && ./install-autostart.sh)
+(cd desktop-agent  && ./install-autostart.sh)
+
+# upgrading code does NOT restart a running daemon — restart explicitly:
+task upgrade       # git pull + uv sync + restart in one step
+task restart       # restart only (e.g. after editing .env)
+
+# removal — always unload the daemon BEFORE deleting the code, or launchd
+# will keep respawning a missing binary:
+(cd xtts-server    && ./uninstall-autostart.sh)
+(cd desktop-agent  && ./uninstall-autostart.sh)
+task down          # orchestrator
+```
+
+Logs go to `~/Library/Logs/voice-assistant/`.  Details:
+[`docs/deployment.md`](docs/deployment.md) §Autostart.
+
 For a complete walk-through including macOS permissions
 (Accessibility, Automation), wake-word training, and the multi-agent
 setup, see [`docs/deployment.md`](docs/deployment.md).

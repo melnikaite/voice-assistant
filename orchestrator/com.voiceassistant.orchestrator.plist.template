@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd plist for auto-starting the orchestrator at login on macOS.
+
+  This is a TEMPLATE — install-autostart.sh substitutes the path
+  placeholders for your actual project location and copies the result
+  into ~/Library/LaunchAgents/.
+
+  After install the orchestrator starts at every login and
+  auto-restarts if it crashes (but NOT if it exits cleanly — see
+  KeepAlive.SuccessfulExit below), and `task up` / `task down` /
+  `task restart` control it.  Uninstall: see uninstall-autostart.sh.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.voiceassistant.orchestrator</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__SCRIPT_PATH__</string>
+    </array>
+
+    <!-- Working directory = orchestrator/.  `uv sync` reads
+         pyproject.toml relative to CWD; .env and data/ resolve
+         from here too. -->
+    <key>WorkingDirectory</key>
+    <string>__SCRIPT_DIR__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart only on crash; a clean exit (task down, kill -TERM)
+         stays down. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- uv lives in /opt/homebrew/bin (brew) or ~/.local/bin (curl
+         installer); /usr/local/bin for Intel Macs and ffmpeg. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/voice-assistant/orchestrator.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/voice-assistant/orchestrator.log</string>
+</dict>
+</plist>
