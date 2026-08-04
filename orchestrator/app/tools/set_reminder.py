@@ -1,14 +1,24 @@
 """
-reminders — unified CRUD tool for scheduling.
+Scheduling tools — one LLM-visible tool per action, one implementation.
 
-Actions
-───────
-  create  Schedule a new reminder or countdown timer.
-  list    Speak the upcoming reminders for this client.
-  cancel  Cancel a pending reminder by fuzzy-matching its text.
+  set_timer        Countdown timer     ('set a timer for 10 minutes')
+  set_reminder_at  Calendar entry      ('remind me at 15:30')
+  list_reminders   Speak what's upcoming
+  cancel_reminder  Cancel by fuzzy-matching its text
 
-The tool is still registered in set_reminder.py so __init__.py doesn't
-need to change; the LLM-visible name is ``reminders``.
+All four are thin wrappers over :func:`_run`, which holds the whole
+implementation — the split exists for the LLM's benefit, not to fork the
+logic.  Why it exists: JSON-Schema ``required`` is unconditional, so a
+single multiplexed tool could only ever require ``action``, leaving the
+field that actually matters (the duration, the datetime, the match text)
+optional.  Measured consequence: models that decline to emit optional
+fields called the tool with no duration at all and the timer errored out.
+One action per tool makes ``required`` mean what it says.
+
+``set_timer`` takes an ISO-8601 duration string (``PT1H30M``) rather than
+an integer count of seconds: transcribing a spoken length into a fixed
+format is reliable, deriving 5400 from "полтора часа" is not.  Same
+normalisation Alexa/Lex apply to spoken durations.
 
 Spoken durations and time anchors come from ``i18n.format_duration_seconds``
 and ``i18n.format_when`` (Babel under the hood) — see ``i18n.py`` for
@@ -17,6 +27,7 @@ the locale wiring.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -46,10 +57,18 @@ def _fmt_reminder_for_list(r: dict, now: float, lang: str | None) -> str:
 
 # ── Fuzzy cancel matching ──────────────────────────────────────────────────
 
+# Tokenise on word characters, NOT whitespace: the stored push_text comes out
+# of an i18n template that punctuates it ("boil the eggs! 10 minutes has
+# passed."), so a raw .split() yields "eggs!" and never matches a user saying
+# "eggs" — which silently made cancel-by-label impossible for every labelled
+# reminder.
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
 def _word_overlap(a: str, b: str) -> float:
-    """Jaccard similarity on word sets (case-insensitive)."""
-    wa = set(a.lower().split())
-    wb = set(b.lower().split())
+    """Jaccard similarity on word sets (case-insensitive, punctuation-blind)."""
+    wa = set(_WORD_RE.findall(a.lower()))
+    wb = set(_WORD_RE.findall(b.lower()))
     if not wa or not wb:
         return 0.0
     return len(wa & wb) / len(wa | wb)
@@ -69,69 +88,45 @@ def _best_match(
     return best, best_score
 
 
-# ── Tool ──────────────────────────────────────────────────────────────────
+# ── ISO-8601 durations ────────────────────────────────────────────────────
 
-@tool(
-    name="reminders",
-    description=(
-        "Manage reminders and countdown timers.\n"
-        "  • action='create' + trigger='duration' + seconds=N — countdown "
-        "timer ('set a timer for 10 minutes', 'remind me in half an hour').\n"
-        "  • action='create' + trigger='absolute' + fire_at=ISO8601 — calendar "
-        "entry ('remind me at 15:30', 'meeting tomorrow at 9'). Use the "
-        "current local time provided in this tool's description (below) to "
-        "convert natural phrasing to ISO-8601.\n"
-        "  • action='list' — read out upcoming reminders for this client.\n"
-        "  • action='cancel' + text=<what to cancel> — cancel the reminder "
-        "whose text best matches the given phrase.\n"
-        "`text` is: the reminder phrase for create (e.g. 'eggs', 'call mom'); "
-        "the match query for cancel (e.g. 'eggs', 'meeting')."
-    ),
-    params_schema={
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["create", "list", "cancel"],
-                "description": "What to do.",
-            },
-            "trigger": {
-                "type": "string",
-                "enum": ["duration", "absolute"],
-                "description": (
-                    "Required for action=create. "
-                    "'duration' = countdown, 'absolute' = calendar datetime."
-                ),
-            },
-            "seconds": {
-                "type": "integer",
-                "description": (
-                    "Countdown seconds — required for create+duration."
-                ),
-            },
-            "fire_at": {
-                "type": "string",
-                "description": (
-                    "ISO-8601 datetime — required for create+absolute, "
-                    "e.g. '2026-05-15T15:30:00'."
-                ),
-            },
-            "text": {
-                "type": "string",
-                "description": (
-                    "For create: short reminder phrase the user hears when it fires. "
-                    "For cancel: phrase to match against existing reminders."
-                ),
-            },
-        },
-        "required": ["action"],
-    },
-    # Timers/reminders are reversible (every action has a matching cancel),
-    # so they sit in `low_write` — voice-ID is enough, no passphrase needed
-    # for "set a timer" or "cancel the eggs reminder".
-    risk="low_write",
+# Only the time part is accepted (plus whole days) — a countdown measured in
+# months makes no sense and `_MAX_DURATION_SECONDS` would reject it anyway.
+_ISO_DURATION_RE = re.compile(
+    r"""^P(?:(?P<days>\d+(?:\.\d+)?)D)?
+         (?:T(?:(?P<hours>\d+(?:\.\d+)?)H)?
+             (?:(?P<minutes>\d+(?:\.\d+)?)M)?
+             (?:(?P<seconds>\d+(?:\.\d+)?)S)?)?$""",
+    re.VERBOSE,
 )
-async def set_reminder(
+_ISO_UNIT_SECONDS = {"days": 86400, "hours": 3600, "minutes": 60, "seconds": 1}
+
+
+def _parse_iso_duration(value: str) -> int | None:
+    """``'PT1H30M'`` → ``5400``.  None when the string isn't a duration.
+
+    Tolerates lower case and surrounding whitespace, since that is what a
+    model actually emits.  Returns None for ``'P'``/``'PT'`` (no components)
+    so an empty duration can't silently become a zero-second timer.
+    """
+    m = _ISO_DURATION_RE.match(str(value).strip().upper())
+    if not m or not any(m.groupdict().values()):
+        return None
+    total = sum(
+        float(raw) * _ISO_UNIT_SECONDS[unit]
+        for unit, raw in m.groupdict().items()
+        if raw
+    )
+    return int(total)
+
+
+# ── Shared implementation ─────────────────────────────────────────────────
+#
+# The four tools below differ only in what they advertise to the LLM; every
+# one of them lands here.  Keep the branching in this function — do NOT
+# inline per-action logic into the wrappers.
+
+async def _run(
     *,
     ctx,  # AgentContext — injected by dispatch()
     action: str,
@@ -284,3 +279,123 @@ async def set_reminder(
         text=t("reminders.bad_time", lang),
         data={"error": f"unknown_action:{action!r}"},
     )
+
+
+# ── LLM-visible tools ─────────────────────────────────────────────────────
+#
+# Timers/reminders are reversible (every one has a matching cancel), so the
+# writing actions sit in `low_write` — voice-ID is enough, no passphrase for
+# "set a timer" or "cancel the eggs reminder".  Listing is pure read.
+
+_LABEL_DESC = (
+    "Short phrase the user hears when it fires, e.g. 'eggs', 'call mom'.  "
+    "Omit when the user named no subject."
+)
+
+
+@tool(
+    name="set_timer",
+    description=(
+        "Start a countdown timer — 'set a timer for 10 minutes', 'напомни "
+        "через полчаса', 'разбуди меня через 45 минут'.  For a specific "
+        "clock time or date use `set_reminder_at` instead."
+    ),
+    params_schema={
+        "type": "object",
+        "properties": {
+            "duration": {
+                "type": "string",
+                "description": (
+                    "How long to count down, as an ISO-8601 duration string.  "
+                    "Transcribe the spoken length directly — do NOT convert it "
+                    "to seconds yourself.  Examples: '20 минут' → 'PT20M'; "
+                    "'half an hour' → 'PT30M'; 'полтора часа' → 'PT1H30M'; "
+                    "'два с половиной часа' → 'PT2H30M'; '90 секунд' → 'PT90S'."
+                ),
+            },
+            "text": {"type": "string", "description": _LABEL_DESC},
+        },
+        "required": ["duration"],
+    },
+    risk="low_write",
+)
+async def set_timer(*, ctx, duration: str, text: str | None = None) -> ToolResult:
+    seconds = _parse_iso_duration(duration)
+    if seconds is None:
+        log.info("set_timer: unparseable duration %r", duration)
+        return ToolResult(
+            text=t("reminders.bad_time", unwrap_ctx(ctx).user_lang),
+            data={"error": "bad_iso_duration", "duration": duration},
+        )
+    return await _run(
+        ctx=ctx, action="create", trigger="duration", seconds=seconds, text=text
+    )
+
+
+@tool(
+    name="set_reminder_at",
+    description=(
+        "Schedule a reminder for a specific clock time or date — 'remind me "
+        "at 15:30', 'напомни завтра в 9 утра', 'meeting on Friday at noon'.  "
+        "For a countdown from now use `set_timer` instead."
+    ),
+    params_schema={
+        "type": "object",
+        "properties": {
+            "fire_at": {
+                "type": "string",
+                "description": (
+                    "When to fire, as an ISO-8601 local datetime, e.g. "
+                    "'2026-05-15T15:30:00'.  Resolve 'tomorrow' / 'in the "
+                    "morning' against the current local time given below."
+                ),
+            },
+            "text": {"type": "string", "description": _LABEL_DESC},
+        },
+        "required": ["fire_at"],
+    },
+    risk="low_write",
+)
+async def set_reminder_at(*, ctx, fire_at: str, text: str | None = None) -> ToolResult:
+    return await _run(
+        ctx=ctx, action="create", trigger="absolute", fire_at=fire_at, text=text
+    )
+
+
+@tool(
+    name="list_reminders",
+    description=(
+        "Read out the timers and reminders that are still pending — 'what "
+        "timers do I have', 'какие у меня напоминания'."
+    ),
+    params_schema={"type": "object", "properties": {}, "required": []},
+    risk="read",
+)
+async def list_reminders(*, ctx) -> ToolResult:
+    return await _run(ctx=ctx, action="list")
+
+
+@tool(
+    name="cancel_reminder",
+    description=(
+        "Cancel a pending timer or reminder, matched by what it is about — "
+        "'cancel the eggs timer', 'отмени напоминание про молоко'."
+    ),
+    params_schema={
+        "type": "object",
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": (
+                    "What the reminder is about, as the user referred to it "
+                    "('eggs', 'молоко', 'meeting').  Matched fuzzily against "
+                    "pending reminders."
+                ),
+            },
+        },
+        "required": ["text"],
+    },
+    risk="low_write",
+)
+async def cancel_reminder(*, ctx, text: str) -> ToolResult:
+    return await _run(ctx=ctx, action="cancel", text=text)

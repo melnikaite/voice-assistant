@@ -163,15 +163,19 @@ SYSTEM_PROMPT = (
 
 # Tool schemas are static after first import — every voice turn used to
 # deep-copy the full catalog just to splice in the current time on the
-# ``reminders`` tool.  We now build the catalog ONCE at module load,
-# leaving a ``{now}`` placeholder in the reminders description.  The
-# per-turn cost drops to one ``str.format()``.
+# scheduling tool.  We now build the catalog ONCE at module load, leaving a
+# ``{now}`` placeholder in that one description.  The per-turn cost drops to
+# one ``str.format()``.
+#
+# Only ``set_reminder_at`` gets the clock: it has to resolve "tomorrow at 9"
+# into an absolute datetime.  ``set_timer`` takes an ISO-8601 duration and is
+# independent of what time it is now.
+_CLOCK_TOOL = "set_reminder_at"
 _CLOCK_TEMPLATE = (
     "\n\nCurrent local time for THIS call: {now}. "
-    "Use it ONLY to compute `seconds` for duration triggers and "
-    "`fire_at` ISO-8601 strings for absolute triggers. Do NOT "
-    "use this timestamp to answer questions about the date or "
-    "time — such questions must go through `web_search`."
+    "Use it ONLY to resolve relative phrasing into the `fire_at` "
+    "ISO-8601 datetime. Do NOT use this timestamp to answer questions "
+    "about the date or time — such questions must go through `web_search`."
 )
 
 
@@ -179,7 +183,7 @@ def _build_cached_schemas() -> list[dict]:
     """Snapshot the registry once, embedding the clock placeholder."""
     out: list[dict] = []
     for s in schemas():
-        if s.get("function", {}).get("name") == "reminders":
+        if s.get("function", {}).get("name") == _CLOCK_TOOL:
             fn = dict(s["function"])
             fn["description"] = fn["description"] + _CLOCK_TEMPLATE
             out.append({**s, "function": fn})
@@ -229,12 +233,12 @@ def _schemas_with_clock(now_str: str, device_kind: str | None = None) -> list[di
     if _TOOL_SCHEMAS_CACHED is None:
         _TOOL_SCHEMAS_CACHED = _build_cached_schemas()
     cached = _TOOL_SCHEMAS_CACHED
-    # Splice the clock into the reminders entry's description.  We
+    # Splice the clock into the scheduling entry's description.  We
     # rebuild ONLY that one entry's wrapper so the rest of the list
     # stays the same object identity — no allocation churn.
     out = list(cached)
     for i, s in enumerate(out):
-        if s.get("function", {}).get("name") == "reminders":
+        if s.get("function", {}).get("name") == _CLOCK_TOOL:
             base = s["function"]
             # The placeholder appears at the tail of the description
             # (see _CLOCK_TEMPLATE above).  Find it once at startup

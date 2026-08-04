@@ -62,7 +62,10 @@ def test_known_tools_are_registered():
         "calculator", "weather", "web_search", "news_briefing", "translate",
         "general_answer", "my_history", "look_at_screen", "computer_use",
         "desktop", "remember", "read_memory", "update_settings",
-        "read_settings", "reminders", "items", "categories",
+        "read_settings", "items", "categories",
+        # Scheduling — one tool per action so JSON-Schema `required` can
+        # actually require the field that matters (see set_reminder.py).
+        "set_timer", "set_reminder_at", "list_reminders", "cancel_reminder",
         "inbox_list", "inbox_read", "inbox_reply", "inbox_summary",
         "list_pending", "approve_pending", "reject_pending",
         # Newer tools (#47/#51/#53/#54) — pin them so a future deletion shows up.
