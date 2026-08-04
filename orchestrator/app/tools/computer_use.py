@@ -202,7 +202,14 @@ async def _llm_generate_applescript(
         "human would.  Read-only — destructive verbs (delete, send, "
         "empty, save) are refused at multiple layers.  Use this for "
         "any 'open X', 'set Y to N', 'show me Z', 'switch …', 'find Y "
-        "in the app' request that targets an app or system setting."
+        "in the app' request that targets an app or system setting.  "
+        "This is ALSO the tool for changing browser or window state — "
+        "closing / focusing / reordering tabs and windows ('close every "
+        "Chrome tab except the first', 'switch to the other window').  "
+        "`list_browser_tabs` only enumerates tabs; route anything that "
+        "acts on them here and let the refusal layers decide.  Pick this "
+        "tool even when the goal may be refused — do not silently answer "
+        "in text instead."
     ),
     params_schema={
         "type": "object",

@@ -52,11 +52,15 @@ def _schema() -> dict:
 @tool(
     name="list_browser_tabs",
     description=(
-        "List the Chrome browser tabs that are currently open on the user's "
-        "computer.  Use when the user says 'what tabs do I have open', "
-        "'что у меня в браузере', 'show me my Chrome tabs', 'list open tabs', "
-        "or similar.  Requires Chrome to be running with "
-        "--remote-debugging-port enabled and the desktop-agent running."
+        "READ-ONLY enumeration of the Chrome tabs currently open on the "
+        "user's computer — it returns a list and changes nothing.  Use when "
+        "the user says 'what tabs do I have open', 'что у меня в браузере', "
+        "'show me my Chrome tabs', 'list open tabs', or similar.  "
+        "It CANNOT close, open, reorder, focus or otherwise act on a tab — "
+        "any request that CHANGES browser or window state ('close every tab "
+        "except the first', 'switch to the other window') belongs to "
+        "`computer_use`, even though it mentions tabs.  Requires Chrome "
+        "running with --remote-debugging-port and the desktop-agent running."
     ),
     params_schema=_schema(),
     risk="read",

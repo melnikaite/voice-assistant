@@ -74,12 +74,16 @@ def _schema() -> dict:
 @tool(
     name="stream_camera",
     description=(
-        "Start a live camera stream that any family device can view.  "
-        "Use when the user says 'покажи камеру', 'stream the camera', "
+        "Stream what the CAMERA sees to any family device.  The subject is "
+        "the camera — pick this whenever the user names the camera, no "
+        "matter which device they want it shown on.  Use for 'покажи "
+        "камеру', 'покажи камеру на телевизоре', 'stream the camera', "
         "'show the camera feed', 'покажи что видит камера в прямом эфире', "
-        "'show me the camera live', 'start camera stream'.  "
-        "Returns a live video feed visible on the current device and any "
-        "other device connected to the assistant.  "
+        "'show me the camera live on the TV', 'start camera stream'.  "
+        "For streaming a Chrome TAB rather than the camera, use "
+        "`stream_tab` — mentioning a TV or another device does not make it "
+        "a tab.  Returns a live video feed visible on the current device "
+        "and any other device connected to the assistant.  "
         "Requires the desktop-agent running on the host with camera access."
     ),
     params_schema=_schema(),

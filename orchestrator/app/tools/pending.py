@@ -59,7 +59,12 @@ def _fmt_summary(action: dict, now: float, lang: str | None) -> str:
         "Read out the speaker's queue of deferred (not-yet-approved) "
         "actions — things that were requested but parked because the "
         "speaker hadn't authenticated.  Use when the user asks 'what's "
-        "in my queue', 'what actions are waiting for approval'."
+        "in my queue', 'what actions are waiting for approval'.  "
+        "ALSO use this when the user asks to approve or reject a deferred "
+        "action WITHOUT naming which one ('одобри отложенное', 'approve "
+        "the pending action') — this tool returns the ids that "
+        "`approve_pending` / `reject_pending` need, so read the queue "
+        "first instead of guessing an id."
     ),
     params_schema={"type": "object", "properties": {}, "required": []},
     risk="read",
@@ -80,10 +85,13 @@ async def list_pending(*, ctx) -> ToolResult:
 @tool(
     name="approve_pending",
     description=(
-        "Approve a deferred action by id.  Use when the user explicitly "
-        "says 'approve', 'execute the deferred X', 'confirm number N' "
-        "AFTER having said the passphrase in this turn.  Pass the "
-        "numeric id from list_pending's output."
+        "Approve ONE deferred action whose numeric id is already known.  "
+        "Use when the user names which one: 'approve number 2', 'confirm "
+        "the deferred reminder', 'одобри второе'.  If the user has not "
+        "named one, call `list_pending` instead — never invent an id.  "
+        "Do not withhold this call while reasoning about whether the "
+        "speaker authenticated: the passphrase gate is enforced by the "
+        "runtime after you call, not by you."
     ),
     params_schema={
         "type": "object",

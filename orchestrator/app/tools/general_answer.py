@@ -76,11 +76,15 @@ _SYSTEM_PROMPT = (
 @tool(
     name="general_answer",
     description=(
-        "Answer a general question conversationally. Use as default when no "
-        "specific tool fits but the user clearly asked something. If you are "
-        "not confident, this tool will signal so and the agent loop will "
-        "retry with `web_search` automatically — pick this over `web_search` "
-        "whenever the answer might be in stable training knowledge."
+        "Answer conversationally.  This is the catch-all: use it whenever no "
+        "specific tool fits, INCLUDING requests that are not questions — "
+        "jokes, stories, greetings, small talk, opinions, 'tell me "
+        "something about X'.  Never reply in free text instead of calling "
+        "this; a chatty turn is still a tool call, and this is that tool.  "
+        "If you are not confident, this tool will signal so and the agent "
+        "loop will retry with `web_search` automatically — pick this over "
+        "`web_search` whenever the answer might be in stable training "
+        "knowledge."
     ),
     params_schema={
         "type": "object",
