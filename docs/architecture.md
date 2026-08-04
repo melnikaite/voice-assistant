@@ -298,6 +298,82 @@ Leave the split commented out and Gemma 4 (multimodal) on LocalAI serves both. O
 
 `chat()` records every call to `token_usage`, attributed to `tool_name` so the dashboard shows "X% to web_search, Y% to agent_loop tool selection" (`llm_utils.py:90-131`).
 
+### Models evaluated
+
+Everything below was measured on one M-series Mac / 64 GB, through LocalAI on `:1240`, with the
+production `SYSTEM_PROMPT` and the production tool catalog (`_schemas_with_clock`).  Numbers are
+medians of three runs unless noted.  Read this before trying "a better model" — most of the
+plausible candidates have already been eliminated, and for reasons that are not obvious from
+their benchmark cards.
+
+#### Usable
+
+| | **Gemma 4 E4B QAT q4_0** (default) | **Qwen3-VL-8B-Instruct Q4_K_M** |
+|---|---|---|
+| Install | `local-ai models install …` (already present) | `local-ai models install qwen3-vl-8b-instruct` |
+| Backend | llama-cpp + mmproj | llama-cpp + mmproj (same one) |
+| Licence | Gemma Terms | Apache-2.0 |
+| Recommended context | **131072** — costs almost nothing, see below | **32768** |
+| Resident at that context | **8.3 GB** | **11.1 GB** |
+| Tool selection (34 tools) | 19/20 | **20/20** |
+| Tool arguments | 7/7 | 7/7 |
+| End-to-end `run_agent` | 6/7 | 6/7 |
+| Screen-text recognition | 6/8 (misread "jarvis" as "jarlis") | **8/8** |
+| Click targeting | 152 px mean | **5.3 px mean** |
+| Voice TTFT (no catalog) | 0.75 s | 0.74 s |
+| Tool-selection turn | **1.1–1.2 s** | 1.5–1.6 s |
+| Turn that generates prose | **8–18 s** | 11–29 s |
+| Obeys "never free text" | no — answers chatty turns directly | **yes** |
+
+Gemma remains the default: it is 1.5–2x faster on turns that actually generate speech, and its
+long context is nearly free.  Qwen3-VL is the one credible replacement — better at every
+accuracy axis measured, decisively so on anything involving the screen — and the switch is one
+line, `LLM_MODEL=qwen3-vl-8b-instruct` in `.env` (see `orchestrator/start.sh` for the default).
+It can also take vision alone via `LLM_VISION_MODEL`, but then both models stay resident (~19 GB)
+for a secondary feature; prefer replacing outright or not at all.
+
+#### Context sizing — why the two numbers differ so much
+
+Per-token KV cost is an architectural property, not a tuning knob:
+
+* Gemma 4 E4B — 42 layers, **2** KV heads, and **35 of 42 layers are sliding-attention with a 512-token window**.  ≈14 KB/token, and most layers stop growing entirely.  128K context costs ~1.9 GB.
+* Qwen3-VL-8B — 36 layers, all full attention, 8 KV heads, head_dim 128.  ≈**144 KB/token**, 10x more.  Measured: 10.4 GB @8192, 11.1 @32768, 14.9 @65536, 23.9 @131072.  Its 262144 ceiling would need ~38 GB of KV alone — not usable here.
+
+What the app actually needs: tool catalog ≈8.5K tokens, `browser_read` caps page text at
+`PAGE_TEXT_LIMIT = 8_000` chars (≈2K tokens), `web_search` bodies at 300 chars, history at
+`MAX_HISTORY_TURNS = 10` (20 messages), one screenshot ≈1.3K tokens.  **Worst realistic turn is
+12–14K tokens**, so 32768 is already 2x headroom.  Window size does **not** affect speed —
+llama.cpp allocates KV up front and attends only over real tokens (measured: 1.49–1.61 s at
+32768 vs 1.47–1.79 s at 65536).  It is purely a memory dial.
+
+#### Rejected, with the reason
+
+| Model | Why not |
+|---|---|
+| [Mage-VL](https://huggingface.co/microsoft/Mage-VL) 8-bit (MS, 5B, Codec-ViT + Qwen3-4B) | 30 px pointing — 5x worse than Qwen3-VL. No GGUF, so it needs the `mlx-vlm` backend **plus** an in-place `pip install mlx-vlm==0.6.9` into `~/.localai/backends/metal-mlx-vlm/venv` (the backend pins 0.4.4, which has no `mage_vl`); any backend reinstall silently reverts that and the model stops loading. Lightest of the lot (5.4 GB) and fastest (4.5 s), which is its only argument. |
+| [Holo-3.1-4B](https://huggingface.co/Hcompany/Holo-3.1-4B) Q8_0 | Pointing is fine (6.2 px) and it is cheap (7.7 GB), but it **never reports a missing control** — 0 of 3 — it substitutes the nearest plausible one. Unusable in a closed loop that must know when it cannot see the target. |
+| [Holo-3.1-0.8B](https://huggingface.co/Hcompany/Holo-3.1-0.8B) Q8_0 | The tempting "tiny grounding specialist at 2.2 GB". Pointing 55 px, and worse, it **mixes pixel and normalized coordinate spaces between calls**, so it cannot be calibrated. Reads text acceptably (6/8) but its errors are spatial-association ones — exactly the wrong trade for a grounding role. |
+| Holo-3.1-35B-A3B | 22.2 GB of weights (MoE: all experts must be resident, only compute is 3B) for a non-primary role. Not evaluated — the cost ruled it out first. |
+| Qwen3-VL-8B **Q8_0** | Deliberately not evaluated: its only plausible benefit was fixing the timer-argument failure, and that turned out to be a schema problem (below), so no outcome of the test would have changed the decision. |
+| Not installed: Qwen3-VL 2B/4B/30B-A3B/32B and InternVL3.5 14B/30B-A3B (both in the LocalAI gallery), UI-TARS-2B-SFT, ShowUI-2B, OS-Atlas, `locate-anything-3b` | Left on the shelf once Qwen3-VL-8B cleared every bar. Listed so the search does not start from scratch. |
+
+#### Findings that outlived the model choice
+
+1. **Coordinates come back normalized to [0,1000], not pixels** — in every model tried, and telling them "the image is 1440x900" does not change it. Multiply by `W/1000`, `H/1000`. Read as pixels the same replies look 100–390 px wrong, which reads as a bad model and isn't.
+2. **A model may decline to emit optional fields at all.** Qwen3-VL called the old multiplexed `reminders` tool with `action`+`trigger` and nothing else, because everything else was optional — 0/6 regardless of field name, type, format, property order, `if/then` schemas, or how loudly the prose demanded it. Putting the field in `required` fixed it outright (6/6). Grammar-constrained calling also fixes it but is not needed. This is why scheduling is now four tools — see `set_reminder.py`.
+3. **Spoken durations belong in a fixed machine format, not as computed seconds.** `set_timer` takes ISO-8601 (`PT1H30M`); transcription is reliable where arithmetic is not, and it is what Alexa/Lex normalise spoken durations to. Both models: 6/6 with ISO-8601, including "два с половиной часа" → `PT2H30M`.
+4. **Refusal is a model property, not a prompt property**, and single samples mislead — one early run had Mage-VL inventing a click, the opposite of its stable 3/3 behaviour. Repeat before believing any of this.
+5. **§6's `_validate_action` catches destructive verbs, not confident nonsense.** A not-visible path has to be added whichever model is chosen, and can only be delegated to the model when that model actually refuses.
+6. **Topically varied history breaks referential follow-ups in BOTH models.** "А какая там погода?" after 8 *identical* filler turns resolves fine; after 8 *varied* ones both models answer in free text and call no tool. Depth alone is not the trigger. Open bug, model-independent — the harness that found it is worth keeping.
+7. **`web_search` replies leak the source language** — asked in Russian, the assistant answered in German and English, against `SYSTEM_PROMPT`'s "reply in the user's language". Also model-independent.
+8. The `general_answer(unknown=true)` → `web_search` chain **never fired** in end-to-end runs: both models route straight to `web_search`. The chaining machinery is correct but effectively unexercised.
+
+The harness for all of this is worth rebuilding rather than trusting the numbers blind: a
+screenshot with a handful of controls whose pixel centres you read off by hand, the production
+prompt and catalog, three repeats, and — for anything about the agent loop — `run_agent` itself
+rather than a bare `/v1/chat/completions` call. Several conclusions in this section reversed
+when the probe moved closer to production shape.
+
 ---
 
 ## 9. Multi-agent (desktop-agent) routing
@@ -437,6 +513,45 @@ One-line rationale per decision.
 - **Outer Basic Auth installed at app construction, not in lifespan.** Starlette builds its middleware stack on the first request, which is *after* lifespan startup — so `add_middleware` from inside lifespan silently never wraps requests (or raises). The anti-scanner "door before the house" (#43) is therefore added at module-construction time, reading instance settings synchronously (it already requires a restart to toggle).
 - **Observability from existing rows, no new telemetry pipeline (#46).** `/api/stats` aggregates `token_usage` (cost/tokens) and `utterances` (per-tool latency + error rate) plus a live in-process snapshot (sessions, agents, uptime). No metrics daemon, no external sink — consistent with offline-first; the dashboard is owner-gated behind the `va_session` cookie.
 - **Mixed-utterance attribution via windowed-partials clustering, not diarization (#59).** resemblyzer already computes ~1.6 s window embeddings before averaging them into the utterance d-vector; clustering those windows (seeded 2-means, min-pairwise-cosine homogeneity gate `SPEAKER_MIXED_HOMOGENEITY=0.70`, with blip / same-profile / centroid-proximity guards) detects "two voices in one VAD segment" at zero new dependencies. Empirically: same-voice min-pairwise ≈ 0.69, cross-voice ≈ 0.41 — the guards absorb threshold over-fires. Mixed turns carry no `profile_id`: the cookie fallback is muted, the passphrase auth window is NOT inherited, memory context goes household-wide, and device-tier tools ask whose device instead of guessing (`clarify.which_device`); the existing continuation window catches the answer as a fresh single-speaker turn with its own clean speaker-ID. Real diarization (LocalAI `/v1/audio/diarization`) is Linux-only today — it slots in behind the same `_resolve_speaker` seam later (see `docs/spikes/2026-06-12-localai-spike.md`).
+
+---
+
+## 13. Known defects (TODO)
+
+Reproduced and characterised, not yet fixed.  Both are **model-independent** — they were
+measured on Gemma 4 E4B and Qwen3-VL-8B alike, so swapping models will not clear them and
+neither should be used as an argument for or against a model.
+
+### TODO: referential follow-ups fail after topically varied history
+
+`"А какая там погода?"` after an assistant turn about Munich resolves correctly with a shallow
+history, and still resolves after **8 identical** filler turns.  After **8 topically varied**
+filler turns (different subjects, one per pair), both models return free text and call no tool
+at all — so the user gets a vague answer instead of a weather lookup.
+
+Depth alone is not the trigger; diversity is.  This matters because production always sends
+history: `ws.py:62` `MAX_HISTORY_TURNS = 10` → up to 20 messages.
+
+Reproduce with `run_agent` directly (a bare `/v1/chat/completions` probe shows the same thing
+but is easier to misread): one turn establishing a subject, N filler pairs with *different*
+subjects, then a referential question.  Compare N identical vs N varied.
+
+Candidate directions, none validated: restate the resolved subject in the user message before
+the model sees it; summarise rather than replay old turns; or drop filler turns that carry no
+entities.  `SYSTEM_PROMPT` already instructs the model to "expand the topic in the tool
+arguments" — the instruction is present and ignored, so prompt wording alone is unlikely to fix it.
+
+### TODO: `web_search` replies leak the source language
+
+Asked in Russian, the assistant answered in German and in English on two separate
+`web_search` turns — the reply carries the language of the fetched sources instead of the
+user's, against `SYSTEM_PROMPT`'s "Reply in the user's language" and against the i18n contract
+in house rule 2.  Everything else (`general_answer`, tool confirmations, weather) honours the
+language correctly, so this is specific to how `web_search` folds fetched text into its answer
+(`web_search.py`, which also streams sentence-by-sentence into TTS).
+
+Worth fixing at the summarisation prompt inside the tool rather than in `SYSTEM_PROMPT` —
+the outer instruction is already there and loses to the source material.
 
 ---
 

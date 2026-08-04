@@ -23,7 +23,12 @@ most tasks.
   default is [LocalAI](https://localai.io) (llama.cpp on Metal/CUDA)
   running Gemma 4 E4B QAT: multimodal, so vision rides on the same
   endpoint, and ASR shares the same server.  Works with Ollama, vLLM,
-  llama.cpp, LM Studio out of the box.
+  llama.cpp, LM Studio out of the box.  Qwen3-VL-8B-Instruct at 32k
+  context is the tested alternative — same server, same backend, far
+  better at reading and clicking the screen, ~3 GB more RAM.  Which
+  models were tried, which were rejected and why, and how to size the
+  context window: [`docs/architecture.md`](docs/architecture.md) §8
+  "Models evaluated".
 - 🛠️ **Tools** — calculator, weather, web search, news, translate,
   reminders/timers, semantic memory, computer control via
   AppleScript or vision-loop, and Mail/Calendar bridges through the
