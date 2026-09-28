@@ -80,18 +80,19 @@ Delegate implementation to the `worker` agent using these rules:
   looks easy" justify skipping that check; easy-looking tasks are exactly the
   ones that slip through unnoticed and burn tokens on unrequested work.
 - **Do it yourself (no delegation) only if BOTH hold:** the edit touches 1–2
-  files in a precisely known location, AND you're confident the current
-  session's model is not pricier than the worker's fixed model. Don't just
-  assume this — the system prompt states which model is running the
-  session, but its price relative to the worker's fixed model may not be
-  reliably known to you (pricing changes, model lineups change); when that
-  comparison is uncertain, delegate rather than guess. If the orchestrator
-  IS running on a more expensive tier than the worker, delegate even a
-  small edit — the worker's fixed (cheaper) model doing the work costs less
-  than the pricier orchestrator doing it directly, so "pure overhead" no
-  longer holds. This matters most right when the user has deliberately
-  switched the main session to a cheap/fast model for cost control — doing
-  the work in-session instead of delegating defeats that choice.
+  files in a precisely known location, AND the current session is not
+  pricier to run than the worker. "Pricier" is model tier *and* effort: the
+  worker's are pinned in `.claude/agents/worker.md` (full model ID + an
+  `effort:` field), the session's model is stated in the system prompt but
+  its effort is not. Typical setup: session on Opus 5.5 at `high`, worker
+  on Opus 5.5 at `low` — same model, but the session spends more thinking
+  per turn over a much larger context, so it is the pricier side and
+  anything beyond a precisely-located 1–2 file edit goes to the worker.
+  When the comparison is uncertain (pricing and model lineups change),
+  delegate rather than guess. The reverse also holds: if the user has
+  deliberately switched the main session to a cheaper model than the
+  worker's for cost control, don't hand bulk work to the pricier worker
+  without saying so — that silently defeats their choice.
 - **Send a follow-up task to a live worker (SendMessage):** the next task
   touches the same code the worker just worked on, and no more than a couple
   of minutes have passed.
