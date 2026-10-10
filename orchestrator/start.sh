@@ -42,7 +42,7 @@ set -a
 : "${LLM_MAX_TOKENS:=131072}"
 : "${LLM_TIMEOUT:=120}"
 : "${WHISPER_URL:=http://localhost:1240}"
-: "${WHISPER_MODEL:=whisper-large-q5_0}"
+: "${WHISPER_MODEL:=parakeet-cpp-tdt-0.6b-v3}"
 : "${WHISPER_TEMPERATURE:=0.0}"
 : "${TTS_URL:=http://localhost:9876}"
 : "${DESKTOP_URL:=http://localhost:9877}"
