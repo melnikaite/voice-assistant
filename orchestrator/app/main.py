@@ -429,11 +429,21 @@ async def ws_endpoint(
     await handle_ws(websocket, client_id=client_id, device_kind=device_kind)
 
 
+class _RevalidatingStaticFiles(StaticFiles):
+    """Without Cache-Control, browsers heuristically cache main.js and keep
+    running a stale build against fresh index.html; no-cache revalidates via ETag."""
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 app.mount(
     "/",
     # Native service runs from orchestrator/ with the PWA one level up
     # (STATIC_DIR=../frontend); the docker-compose path mounts ../frontend
     # at /app/static, which stays the default.
-    StaticFiles(directory=os.environ.get("STATIC_DIR", "/app/static"), html=True),
+    _RevalidatingStaticFiles(directory=os.environ.get("STATIC_DIR", "/app/static"), html=True),
     name="static",
 )

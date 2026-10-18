@@ -57,6 +57,7 @@ Do NOT `c.close()` a connection borrowed from `_conn()`. It's thread-local; clos
 | Offline detection? | [`app/net.py::has_internet`](app/net.py) — cached probe against DuckDuckGo lite |
 | Speaker ID? | [`app/speaker.py`](app/speaker.py) (resemblyzer d-vectors) + [`app/storage/speaker_profiles.py`](app/storage/speaker_profiles.py) |
 | Passphrase auth window? | [`app/pipeline.py::_extract_passphrase`](app/pipeline.py) + [`app/user_files.py::verify_passphrase`](app/user_files.py) + [`app/storage/auth_sessions.py`](app/storage/auth_sessions.py) (UI cookie path) |
+| Forgotten code word? | [`app/cli.py`](app/cli.py) — `uv run python -m app.cli reset-passphrase <id\|name>` clears the hash + that profile's sessions |
 | Pending actions? | [`app/storage/pending_actions.py`](app/storage/pending_actions.py) + [`app/pending_executor.py`](app/pending_executor.py) |
 | Semantic memory? | [`app/memory.py`](app/memory.py) — fastembed + cosine in [`app/storage/utterances.py::get_candidate_utterances`](app/storage/utterances.py) |
 | Vision (one-shot)? | [`app/vision.py`](app/vision.py), used by [`app/tools/look_at_screen.py`](app/tools/look_at_screen.py) and the image-attach short-circuit in `pipeline.py` |

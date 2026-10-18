@@ -84,6 +84,27 @@ async def get_speaker_profiles(
     return await asyncio.to_thread(_get_all_sync, client_id)
 
 
+def _get_instance_sync() -> list[tuple[int, str, bytes, int, str | None]]:
+    with _lock:
+        c = _conn()
+        try:
+            return c.execute(
+                "SELECT id, name, embedding, sample_count, tts_voice"
+                " FROM speaker_profiles ORDER BY created_at"
+            ).fetchall()  # type: ignore[return-value]
+        finally:
+            c.close()
+
+
+async def get_all_speaker_profiles() -> list[tuple[int, str, bytes, int, str | None]]:
+    """Every profile on this instance, regardless of the enrolling client.
+
+    One household per server, so the login picker shows everyone; speaker
+    ID and enrollment stay scoped by ``client_id`` via ``get_speaker_profiles``.
+    """
+    return await asyncio.to_thread(_get_instance_sync)
+
+
 def _get_by_name_sync(
     client_id: str, name: str
 ) -> tuple[int, bytes, int] | None:

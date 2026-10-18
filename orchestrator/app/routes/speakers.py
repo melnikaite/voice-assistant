@@ -5,8 +5,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .. import instance_settings, speaker
+from ..user_files import read_settings
 from ..storage import (
     delete_speaker_profile,
+    get_all_speaker_profiles,
     get_speaker_profile_by_name,
     get_speaker_profiles,
     save_speaker_profile,
@@ -20,21 +22,29 @@ router = APIRouter()
 
 
 @router.get("/api/speakers")
-async def list_speakers(client_id: str) -> JSONResponse:
-    """List enrolled speaker profiles for a client."""
-    profiles = await get_speaker_profiles(client_id)
-    # Row: (id, name, embedding_bytes, sample_count, tts_voice).  We
-    # surface sample_count as "samples" for the UI, and tts_voice as
-    # "voice" — NULL means "use server default" and the UI shows that
-    # as the blank/auto option in the dropdown.
-    return JSONResponse(
-        {
-            "speakers": [
-                {"id": p[0], "name": p[1], "samples": p[3], "voice": p[4]}
-                for p in profiles
-            ]
-        }
-    )
+async def list_speakers(client_id: str | None = None) -> JSONResponse:
+    """List enrolled speaker profiles.
+
+    With ``client_id`` — the profiles that browser enrolled (voice-profiles
+    panel, where enrollment is keyed by client_id).  Without — every profile
+    on the instance (login picker; one household per server).  Also returns
+    ``registration_open`` so the logged-out UI can offer "Add profile".
+    """
+    if client_id:
+        profiles = await get_speaker_profiles(client_id)
+    else:
+        profiles = await get_all_speaker_profiles()
+    cfg = await instance_settings.read()
+    # Row: (id, name, embedding_bytes, sample_count, tts_voice).  NULL
+    # voice means "server default".  has_passphrase picks setup vs login.
+    speakers = []
+    for p in profiles:
+        settings = await read_settings(p[0])
+        speakers.append({
+            "id": p[0], "name": p[1], "samples": p[3], "voice": p[4],
+            "has_passphrase": bool(settings.code_word_hash),
+        })
+    return JSONResponse({"speakers": speakers, "registration_open": cfg.registration_open})
 
 
 class SpeakerPatchRequest(BaseModel):

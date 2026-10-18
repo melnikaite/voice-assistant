@@ -39,14 +39,39 @@
               Log in with your profile to edit memory, settings, and confirm deferred actions.
             </small>
           </p>
-          <div class="grid" style="grid-template-columns: 1fr 1fr auto">
-            <select id="auth-profile">
-              <option value="" data-i18n="auth.pick_profile">— pick a profile —</option>
-            </select>
-            <input id="auth-passphrase" type="password" data-i18n-placeholder="auth.password" placeholder="Password" autocomplete="current-password" />
+          <select id="auth-profile">
+            <option value="" data-i18n="auth.pick_profile">— pick a profile —</option>
+          </select>
+          <div id="auth-login-form" class="grid" style="grid-template-columns: 1fr auto; display:none">
+            <input id="auth-passphrase" type="password" data-i18n-placeholder="auth.code_word" placeholder="Code word" autocomplete="current-password" />
             <button id="auth-login-btn" type="button" data-i18n="auth.login">Log in</button>
           </div>
-          <small id="auth-status" style="color:var(--pico-muted-color)"></small>
+          <div id="auth-setcode-form" class="grid" style="grid-template-columns: 1fr 1fr auto; display:none">
+            <input id="auth-new-code" type="password" data-i18n-placeholder="auth.new_code_word" placeholder="New code word" autocomplete="new-password" />
+            <input id="auth-new-code2" type="password" data-i18n-placeholder="auth.repeat_code_word" placeholder="Repeat code word" autocomplete="new-password" />
+            <button id="auth-setcode-btn" type="button" data-i18n="auth.set_code_word">Set code word</button>
+          </div>
+          <small style="display:block; color:var(--pico-muted-color)" data-i18n="auth.code_word_hint">
+            The code word is the same word you say aloud to confirm protected actions.
+          </small>
+          <small id="auth-forgot-hint" style="display:none; color:var(--pico-muted-color)" data-i18n="auth.forgot_hint">
+            Forgot it? On the server run: uv run python -m app.cli reset-passphrase &lt;name&gt;
+          </small>
+          <small id="auth-status" style="display:block; color:var(--pico-muted-color)"></small>
+          <button class="auth-add-profile outline secondary" type="button" style="display:none; margin-top:0.5rem" data-i18n="auth.add_profile">Add profile</button>
+        </div>
+
+        <div id="auth-first-run" class="auth-block" style="display:none">
+          <header data-i18n="auth.first_run">First run</header>
+          <ol>
+            <li data-i18n="auth.step_record">Record your voice in «Voice profiles».</li>
+            <li data-i18n="auth.step_code_word">Pick your profile here and set a code word.</li>
+            <li data-i18n="auth.step_done">You're in — the same code word, spoken aloud, confirms protected actions.</li>
+          </ol>
+          <button class="auth-add-profile" type="button" style="display:none" data-i18n="auth.add_profile">Add profile</button>
+          <small id="auth-first-run-closed" style="display:none; color:var(--pico-muted-color)" data-i18n="auth.registration_closed">
+            Registration is closed on this server.
+          </small>
         </div>
 
         <div id="auth-known" class="auth-block" style="display:none">
@@ -58,24 +83,18 @@
                 · <span data-i18n="auth.valid_until">valid until</span> <span id="auth-current-expires">—</span>
               </small>
             </p>
-            <button id="auth-set-passphrase-btn" class="outline secondary" type="button" data-i18n="auth.change_pw">Change password</button>
+            <button id="auth-set-passphrase-btn" class="outline secondary" type="button" data-i18n="auth.change_code_word">Change code word</button>
             <button id="auth-logout-btn" class="outline" type="button" data-i18n="auth.logout">Log out</button>
           </div>
         </div>
 
         <div id="auth-needs-setup" class="auth-block" style="display:none">
-          <header data-i18n="auth.first_run">First run</header>
-          <p>
-            <small style="color:var(--pico-muted-color)" data-i18n="auth.first_run_hint">
-              Create a password for your profile — needed to confirm deferred actions and edit memory.
-            </small>
-          </p>
-          <div class="grid" style="grid-template-columns: 1fr 1fr auto">
-            <select id="setup-profile">
-              <option value="" data-i18n="auth.pick_profile">— pick a profile —</option>
-            </select>
-            <input id="setup-passphrase" type="password" data-i18n-placeholder="auth.new_password" placeholder="New password" />
-            <button id="setup-btn" type="button" data-i18n="auth.create">Create</button>
+          <header data-i18n="auth.change_code_word">Change code word</header>
+          <div class="grid" style="grid-template-columns: 1fr 1fr auto auto">
+            <input id="setup-current" type="password" data-i18n-placeholder="auth.current_code_word" placeholder="Current code word" autocomplete="current-password" />
+            <input id="setup-passphrase" type="password" data-i18n-placeholder="auth.new_code_word" placeholder="New code word" autocomplete="new-password" />
+            <button id="setup-btn" type="button" data-i18n="auth.save">Save</button>
+            <button id="setup-cancel-btn" class="outline secondary" type="button" data-i18n="auth.cancel">Cancel</button>
           </div>
           <small id="setup-status" style="color:var(--pico-muted-color)"></small>
         </div>

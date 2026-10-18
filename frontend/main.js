@@ -1381,6 +1381,8 @@ async function startEnrollFlow() {
       log(`speaker: enrolled "${name}" (id=${data.id})`);
       if (nameInput) nameInput.value = '';
       loadSpeakers();
+      // A new profile belongs in the login picker right away.
+      if (!_currentProfile) loadAuthState();
     } else {
       if (status) status.textContent = i18n('speaker.error', { err: data.error });
       log(`speaker enroll error: ${data.error}`);
@@ -1877,7 +1879,15 @@ const authCurrentNameEl   = document.querySelector('#auth-current-name');
 const authCurrentExpEl    = document.querySelector('#auth-current-expires');
 const authLogoutBtn       = document.querySelector('#auth-logout-btn');
 const authSetPassBtn      = document.querySelector('#auth-set-passphrase-btn');
-const setupProfileSelect  = document.querySelector('#setup-profile');
+const authFirstRunEl      = document.querySelector('#auth-first-run');
+const authLoginFormEl     = document.querySelector('#auth-login-form');
+const authSetCodeFormEl   = document.querySelector('#auth-setcode-form');
+const authNewCodeEl       = document.querySelector('#auth-new-code');
+const authNewCode2El      = document.querySelector('#auth-new-code2');
+const authSetCodeBtn      = document.querySelector('#auth-setcode-btn');
+const authForgotHintEl    = document.querySelector('#auth-forgot-hint');
+const setupCurrentEl      = document.querySelector('#setup-current');
+const setupCancelBtn      = document.querySelector('#setup-cancel-btn');
 const setupPassphraseEl   = document.querySelector('#setup-passphrase');
 const setupBtn            = document.querySelector('#setup-btn');
 const setupStatusEl       = document.querySelector('#setup-status');
@@ -1909,13 +1919,17 @@ const settingsStatusEl   = document.querySelector('#settings-status');
 // the logged-in profile.  Used by every tier-2 fetch to construct
 // /api/users/<id>/<...> URLs.
 let _currentProfile = null;
+// Last /api/speakers result for the login picker (carries has_passphrase).
+let _loginProfiles = [];
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function _setAuthBlock(name) {
   // Show exactly one of the three blocks inside #auth-banner.  Names:
-  // 'anonymous' | 'known' | 'needs-setup' | 'loading' (all hidden).
+  // 'anonymous' | 'first-run' | 'known' | 'needs-setup' (rotate form)
+  // | 'loading' (all hidden).
   authAnonymousEl.style.display  = name === 'anonymous'   ? '' : 'none';
+  authFirstRunEl.style.display   = name === 'first-run'   ? '' : 'none';
   authKnownEl.style.display      = name === 'known'       ? '' : 'none';
   authNeedsSetupEl.style.display = name === 'needs-setup' ? '' : 'none';
 }
@@ -1936,16 +1950,38 @@ function _fmtExpiry(epoch) {
 }
 
 async function _fetchProfilesForLogin() {
-  // Reuse /api/speakers — it's per-client_id, which matches the
-  // login-from-this-browser model.  Returns [{id, name, ...}, ...].
+  // No client_id: every profile on the instance (one household per
+  // server), not just the ones this browser enrolled.
   try {
-    const r = await fetch(`/api/speakers?client_id=${encodeURIComponent(clientId)}`);
+    const r = await fetch('/api/speakers');
     const data = await r.json();
+    document.querySelectorAll('.auth-add-profile').forEach((el) => {
+      el.style.display = data.registration_open ? '' : 'none';
+    });
+    authFirstRunEl.querySelector('#auth-first-run-closed').style.display =
+      data.registration_open ? 'none' : '';
     return data.speakers || [];
   } catch (e) {
     log(`auth: cannot list profiles: ${e.message}`);
     return [];
   }
+}
+
+// Picked profile decides the form: login if it has a code word, else set one.
+function _syncLoginForm() {
+  const p = _loginProfiles.find((x) => String(x.id) === authProfileSelect.value);
+  authLoginFormEl.style.display   = p && p.has_passphrase ? '' : 'none';
+  authSetCodeFormEl.style.display = p && !p.has_passphrase ? '' : 'none';
+  authForgotHintEl.style.display  = p && p.has_passphrase ? 'block' : 'none';
+  authStatusEl.textContent = '';
+}
+
+function _openEnrollPanel() {
+  const panel = document.querySelector('#speaker-panel');
+  if (!panel) return;
+  panel.open = true;
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.querySelector('#enroll-name')?.focus();
 }
 
 function _populateProfileSelect(selectEl, profiles) {
@@ -2006,30 +2042,21 @@ async function loadAuthState() {
     return;
   }
 
-  // Anonymous — figure out which sub-block to show.
+  // Anonymous — first-run guide when nobody is enrolled, else the picker.
   _currentProfile = null;
   destroyItems();
   _setTierTwoVisible(false);
+  _loginProfiles = profiles;
   if (profiles.length === 0) {
-    // No profiles enrolled at all — login is impossible until someone
-    // enrols via the "Voice profiles" section.  Show needs-setup so at
-    // least the message guides the user, but the dropdown will be empty.
-    _populateProfileSelect(setupProfileSelect, profiles);
-    _setAuthBlock('needs-setup');
-    setupStatusEl.textContent = i18n('auth.record_profile_first');
+    _setAuthBlock('first-run');
     return;
   }
-
-  // We have profiles.  Check if ANY of them has a passphrase set — if
-  // yes, show login; if no, show setup.  We can't introspect bcrypt
-  // hashes from the client, so heuristic: if every login attempt
-  // immediately 404s, show setup.  Simpler: just show login by
-  // default and let setup be reachable via the "Change password" path.
+  const picked = authProfileSelect.value;
   _populateProfileSelect(authProfileSelect, profiles);
-  _populateProfileSelect(setupProfileSelect, profiles);
+  if (profiles.some((p) => String(p.id) === picked)) authProfileSelect.value = picked;
+  else if (profiles.length === 1) authProfileSelect.value = String(profiles[0].id);
+  _syncLoginForm();
   _setAuthBlock('anonymous');
-  authStatusEl.textContent = '';
-  setupStatusEl.textContent = '';
 }
 
 // ── Login / logout / setup ──────────────────────────────────────────────
@@ -2087,15 +2114,19 @@ async function doLogout() {
   await loadAuthState();
 }
 
-async function doSetupPassphrase() {
-  const profileId = parseInt(setupProfileSelect.value, 10);
-  const passphrase = setupPassphraseEl.value;
-  if (!profileId || !passphrase) {
-    setupStatusEl.textContent = i18n('auth.select_and_new_password');
+async function doSetCodeWord() {
+  const profileId = parseInt(authProfileSelect.value, 10);
+  const passphrase = authNewCodeEl.value;
+  if (!profileId || !passphrase.trim()) {
+    authStatusEl.textContent = i18n('auth.select_and_new_password');
     return;
   }
-  setupStatusEl.textContent = i18n('auth.creating');
-  setupBtn.disabled = true;
+  if (passphrase !== authNewCode2El.value) {
+    authStatusEl.textContent = i18n('auth.code_words_differ');
+    return;
+  }
+  authStatusEl.textContent = i18n('auth.creating');
+  authSetCodeBtn.disabled = true;
   try {
     const r = await fetch('/api/auth/setup_passphrase', {
       method: 'POST',
@@ -2103,16 +2134,53 @@ async function doSetupPassphrase() {
       body: JSON.stringify({ profile_id: profileId, passphrase }),
     });
     if (r.status === 403) {
-      setupStatusEl.textContent = i18n('auth.already_has_password');
+      authStatusEl.textContent = i18n('auth.already_has_password');
+      await loadAuthState();
+      return;
+    }
+    if (!r.ok) {
+      authStatusEl.textContent = i18n('auth.error_http', { status: r.status });
+      return;
+    }
+    // Same word logs straight in — no second prompt.
+    authPassphraseInput.value = passphrase;
+    authNewCodeEl.value = '';
+    authNewCode2El.value = '';
+    await doLogin();
+  } catch (e) {
+    authStatusEl.textContent = i18n('auth.network_error', { err: e.message });
+  } finally {
+    authSetCodeBtn.disabled = false;
+  }
+}
+
+async function doRotatePassphrase() {
+  const current = setupCurrentEl.value;
+  const passphrase = setupPassphraseEl.value;
+  if (!current || !passphrase.trim()) {
+    setupStatusEl.textContent = i18n('auth.enter_current_and_new');
+    return;
+  }
+  setupBtn.disabled = true;
+  try {
+    const r = await fetch('/api/auth/rotate_passphrase', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_passphrase: current, new_passphrase: passphrase }),
+    });
+    if (r.status === 401) {
+      setupStatusEl.textContent = i18n('auth.wrong_password');
       return;
     }
     if (!r.ok) {
       setupStatusEl.textContent = i18n('auth.error_http', { status: r.status });
       return;
     }
+    setupCurrentEl.value = '';
     setupPassphraseEl.value = '';
-    setupStatusEl.textContent = i18n('auth.done_now_login');
-    await loadAuthState();
+    setupStatusEl.textContent = '';
+    _setAuthBlock('known');
   } catch (e) {
     setupStatusEl.textContent = i18n('auth.network_error', { err: e.message });
   } finally {
@@ -2124,18 +2192,22 @@ authLoginBtn?.addEventListener('click', doLogin);
 authPassphraseInput?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') doLogin();
 });
+authProfileSelect?.addEventListener('change', _syncLoginForm);
+authSetCodeBtn?.addEventListener('click', doSetCodeWord);
+authNewCode2El?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') doSetCodeWord();
+});
+document.querySelectorAll('.auth-add-profile').forEach((el) => {
+  el.addEventListener('click', _openEnrollPanel);
+});
 authLogoutBtn?.addEventListener('click', doLogout);
 authSetPassBtn?.addEventListener('click', () => {
-  // Switch the "known" block to a passphrase-set form by pre-selecting
-  // the current profile in setupProfileSelect and toggling the visible
-  // block.  Keeps the URL-less "rotate my password" flow inside one tab.
-  if (_currentProfile) {
-    setupProfileSelect.value = String(_currentProfile.id);
-  }
+  // Logged in, so the code word exists — rotate (needs the current one).
   setupStatusEl.textContent = '';
   _setAuthBlock('needs-setup');
 });
-setupBtn?.addEventListener('click', doSetupPassphrase);
+setupBtn?.addEventListener('click', doRotatePassphrase);
+setupCancelBtn?.addEventListener('click', () => _setAuthBlock('known'));
 
 // ── Pending tab ─────────────────────────────────────────────────────────
 

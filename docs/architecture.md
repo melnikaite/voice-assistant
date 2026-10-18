@@ -57,7 +57,7 @@ Orchestrator never talks to the user directly. Browser is the only client; every
 
 ## 2. Data flow per turn
 
-Typical wall-clock budgets on an M-series Mac with Gemma 4 E4B local:
+Typical wall-clock budgets on an M-series Mac with a local 4–8B model (Qwen3-VL-8B by default):
 
 - ASR + speaker-ID in parallel (~250 ms). Speaker-ID threshold 0.75 (env: `SPEAKER_THRESHOLD`); same speaker typically 0.80+, different speakers below 0.70.
 - Agent loop — LLM tool selection + tool dispatch (~1-3 s; dominant cost).
@@ -285,7 +285,7 @@ Don't add one for one-off settings (use `user_files.py` JSON files) or small cac
 | `LLM_VISION_URL`   | Vision endpoint override (defaults to `LLM_URL`).                             |
 | `LLM_VISION_MODEL` | Vision model override (defaults to `LLM_MODEL`).                              |
 
-Leave the split commented out and Gemma 4 (multimodal) on LocalAI serves both. Override only when you want different providers for text vs vision. `chat()` accepts `endpoint_url=` and `model=` per-call (`llm_utils.py:146-148`); `vision.py` routes vision calls to `LLM_VISION_URL` automatically. `chat_stream()` is the streaming counterpart, used by `web_search` for sentence-by-sentence TTS (`llm_utils.py:219-319`).
+Leave the split commented out and the one multimodal model on LocalAI (Qwen3-VL-8B by default) serves both. Override only when you want different providers for text vs vision. `chat()` accepts `endpoint_url=` and `model=` per-call (`llm_utils.py:146-148`); `vision.py` routes vision calls to `LLM_VISION_URL` automatically. `chat_stream()` is the streaming counterpart, used by `web_search` for sentence-by-sentence TTS (`llm_utils.py:219-319`).
 
 ### Compatibility matrix
 
@@ -311,7 +311,7 @@ their benchmark cards.
 
 #### Usable
 
-| | **Gemma 4 E4B QAT q4_0** (default) | **Qwen3-VL-8B-Instruct Q4_K_M** |
+| | **Gemma 4 E4B QAT q4_0** (fallback) | **Qwen3-VL-8B-Instruct Q4_K_M** (default) |
 |---|---|---|
 | Install | `local-ai models install …` (already present) | `local-ai models install qwen3-vl-8b-instruct` |
 | Backend | llama-cpp + mmproj | llama-cpp + mmproj (same one) |
@@ -328,12 +328,12 @@ their benchmark cards.
 | Turn that generates prose | **8–18 s** | 11–29 s |
 | Obeys "never free text" | no — answers chatty turns directly | **yes** |
 
-Gemma remains the default: it is 1.5–2x faster on turns that actually generate speech, and its
-long context is nearly free.  Qwen3-VL is the one credible replacement — better at every
-accuracy axis measured, decisively so on anything involving the screen — and the switch is one
-line, `LLM_MODEL=qwen3-vl-8b-instruct` in `.env` (see `orchestrator/start.sh` for the default).
-It can also take vision alone via `LLM_VISION_MODEL`, but then both models stay resident (~19 GB)
-for a secondary feature; prefer replacing outright or not at all.
+Qwen3-VL is the default — `LLM_MODEL=qwen3-vl-8b-instruct` in `.env` — for being better at
+every accuracy axis measured, decisively so on anything involving the screen.  Gemma 4 E4B is the
+fallback: `orchestrator/start.sh` uses it when `LLM_MODEL` is unset, and it is 1.5–2x faster on
+turns that generate speech with a nearly free long context.  Switching is that one line; running
+Gemma for text and Qwen for vision via `LLM_VISION_MODEL` keeps both resident (~19 GB), so prefer
+one model outright.
 
 #### Context sizing — why the two numbers differ so much
 

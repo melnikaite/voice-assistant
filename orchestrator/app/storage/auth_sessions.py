@@ -93,6 +93,21 @@ async def revoke_session(token: str) -> None:
     await asyncio.to_thread(_revoke_sync, token)
 
 
+def _revoke_profile_sync(profile_id: int) -> int:
+    with _lock:
+        c = _conn()
+        try:
+            cur = c.execute("DELETE FROM auth_sessions WHERE profile_id=?", (profile_id,))
+            return cur.rowcount
+        finally:
+            c.close()
+
+
+async def revoke_profile_sessions(profile_id: int) -> int:
+    """Drop every session of ``profile_id`` (live or expired).  Returns rows deleted."""
+    return await asyncio.to_thread(_revoke_profile_sync, profile_id)
+
+
 def _sweep_sync() -> int:
     with _lock:
         c = _conn()

@@ -38,6 +38,7 @@ from .reminders import (
 from .speaker_profiles import (
     delete_speaker_profile,
     get_speaker_profile_by_name,
+    get_all_speaker_profiles,
     get_speaker_profiles,
     save_speaker_profile,
     set_speaker_tts_voice,
@@ -71,6 +72,7 @@ from .pending_actions import (
 from .auth_sessions import (
     create_session,
     get_session,
+    revoke_profile_sessions,
     revoke_session,
     sweep_expired_sessions,
 )
@@ -168,6 +170,7 @@ __all__ = [
     # speaker profiles
     "save_speaker_profile",
     "update_speaker_profile",
+    "get_all_speaker_profiles",
     "get_speaker_profiles",
     "get_speaker_profile_by_name",
     "set_speaker_tts_voice",
@@ -197,6 +200,7 @@ __all__ = [
     # auth sessions
     "create_session",
     "get_session",
+    "revoke_profile_sessions",
     "revoke_session",
     "sweep_expired_sessions",
     # step-up grants (#55)

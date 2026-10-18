@@ -147,6 +147,22 @@ For a complete walk-through including macOS permissions
 (Accessibility, Automation), wake-word training, and the multi-agent
 setup, see [`docs/deployment.md`](docs/deployment.md).
 
+## First run
+
+1. Open the web UI (`http://<host>:8080`), expand **Voice profiles** (or press **Add profile**
+   in the sign-in box), enter your name and record a 5-second sample.
+2. Pick your profile in the sign-in box and set a **code word** (typed twice).  It is the same
+   word you say aloud to confirm protected actions.
+3. You are logged in; the Pending, Memory and Settings panels unlock.
+
+Forgot the code word?  On the server:
+
+```bash
+cd orchestrator && uv run python -m app.cli reset-passphrase <profile_id|name>
+```
+
+It clears the code word and logs that profile out everywhere; set a new one from the sign-in box.
+
 ## Repository layout
 
 ```

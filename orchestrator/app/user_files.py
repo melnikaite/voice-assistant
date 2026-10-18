@@ -274,6 +274,15 @@ async def set_passphrase(profile_id: int, plaintext: str) -> None:
     await write_settings(profile_id, updated)
 
 
+async def clear_passphrase(profile_id: int) -> bool:
+    """Drop the stored hash so the open setup path applies again.  True if one existed."""
+    current = await read_settings(profile_id)
+    if not current.code_word_hash:
+        return False
+    await write_settings(profile_id, current.model_copy(update={"code_word_hash": None}))
+    return True
+
+
 async def verify_passphrase(profile_id: int, plaintext: str) -> bool:
     """True iff ``plaintext`` matches the stored bcrypt hash."""
     normalised = _normalise_passphrase(plaintext)
