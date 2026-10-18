@@ -570,3 +570,11 @@ dialog#items-modal .modal-actions {
   gap: 0.5rem;
   margin-top: 1rem;
 }
+
+/* Datasets of the selected category (read-only tables) */
+.ds-block { margin: 0 0 .75rem; }
+.ds-block summary { cursor: pointer; }
+.ds-scroll { overflow-x: auto; }
+.ds-table { font-size: .85rem; margin: .25rem 0 0; }
+.ds-table th, .ds-table td { padding: .2rem .4rem; white-space: nowrap; }
+.ds-table button { padding: 0 .4rem; margin: 0; }

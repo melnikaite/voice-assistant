@@ -16,6 +16,11 @@ Measured with ``scripts/context_probe.py`` (architecture.md §13).
 Slots come from two places: ``@tool(focus={arg: slot})`` maps call arguments,
 and a tool may return ``ToolResult.data["focus"] = {slot: value}`` for things
 only its output knows (e.g. which reminder ``list_reminders`` found).
+
+``held`` is a partial result a tool asked to keep until the user answers
+(``ToolResult.data["hold"]``; ``None`` clears it) — e.g. a dataset entry
+missing a required field.  The pipeline hands it back through
+``AgentContext.held`` for ``HELD_TTL_TURNS`` turns.
 """
 from __future__ import annotations
 
@@ -30,6 +35,7 @@ log = logging.getLogger(__name__)
 
 KEEP_TURNS = int(os.environ.get("CONVERSATION_KEEP_TURNS", "6"))
 FOCUS_TTL_TURNS = 10
+HELD_TTL_TURNS = 3
 
 # A list of subjects rather than prose: prose summaries kept rewriting the
 # oldest subject away after a few merges.
@@ -57,6 +63,7 @@ class Conversation:
     summary: str = ""
     focus: dict[str, FocusEntry] = field(default_factory=dict)
     turn: int = 0
+    _held: "tuple[dict, int] | None" = field(default=None, repr=False)
     keep_turns: int = KEEP_TURNS
     _unfolded: list[dict] = field(default_factory=list, repr=False)
     _fold_task: "asyncio.Task | None" = field(default=None, repr=False)
@@ -83,6 +90,7 @@ class Conversation:
         self._unfolded.clear()
         self.summary = ""
         self.focus.clear()
+        self._held = None
         if self._fold_task is not None:
             self._fold_task.cancel()
             self._fold_task = None
@@ -92,6 +100,8 @@ class Conversation:
 
         if isinstance(data, dict) and data.get("error"):
             return
+        if isinstance(data, dict) and "hold" in data:
+            self._held = (data["hold"], self.turn) if data["hold"] else None
         meta = TOOL_REGISTRY.get(tool) or {}
         for arg, slot in (meta.get("focus") or {}).items():
             val = args.get(arg)
@@ -110,6 +120,12 @@ class Conversation:
             {"role": "user", "content": f"(Earlier in this conversation, oldest first: {self.summary})"},
             {"role": "assistant", "content": "OK."},
         ] + self.history
+
+    @property
+    def held(self) -> dict | None:
+        if self._held and self.turn - self._held[1] < HELD_TTL_TURNS:
+            return self._held[0]
+        return None
 
     @property
     def turns(self) -> int:

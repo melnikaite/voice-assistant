@@ -48,6 +48,7 @@ from .storage import (
 )
 from .user_files import verify_passphrase
 from .storage.categories import get_last_category
+from .tools.datasets import context_block as dataset_context_block
 
 log = logging.getLogger(__name__)
 
@@ -805,6 +806,8 @@ class Pipeline:
                 step_up_auth=step_up_auth,
                 mixed=attr.is_mixed,
                 participants=attr.participants,
+                held=conversation.held if conversation is not None else None,
+                transcript=transcript,
             )
             focus_block = ""
             if conversation is not None:
@@ -814,6 +817,14 @@ class Pipeline:
                     if last_cat:
                         fallback["list"] = last_cat["name"]
                 focus_block = conversation.focus_block(fallback)
+                if profile_id is not None:
+                    focused = conversation.focus.get("list")
+                    data_block = await dataset_context_block(
+                        profile_id, focused.value if focused else fallback.get("list"),
+                        ctx.held,
+                    )
+                    if data_block:
+                        focus_block = f"{focus_block}\n{data_block}" if focus_block else data_block
             agent_result: AgentResult = await run_agent(
                 transcript,
                 ctx=ctx,

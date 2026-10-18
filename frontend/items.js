@@ -262,6 +262,63 @@ async function loadItems() {
 
   if (statusEl) statusEl.textContent = '';
   renderItems();
+  loadDatasets();
+}
+
+// ── Datasets (read-only, entry delete) ────────────────────────────────────
+
+async function loadDatasets() {
+  const el = $('items-datasets');
+  if (!el) return;
+  if (_selCatId === null || _trash) { el.innerHTML = ''; return; }
+  const catId = _selCatId;
+  let data;
+  try {
+    data = await _get(`/categories/${catId}/datasets`);
+  } catch (e) {
+    console.error('items: loadDatasets failed', e);
+    el.innerHTML = '';
+    return;
+  }
+  if (catId !== _selCatId) return;  // selection changed meanwhile
+  el.innerHTML = (data.datasets || []).map(_renderDataset).join('');
+  el.querySelectorAll('.ds-entry-del').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm(t('items.ds_delete_entry_confirm'))) return;
+      try {
+        await _delete(`/dataset-entries/${btn.dataset.entryId}`);
+        loadDatasets();
+      } catch (e) {
+        alert(`${t('items.error')}: ${e.message}`);
+      }
+    });
+  });
+}
+
+function _dsCell(data, path) {
+  let v = data;
+  for (const p of path.split('.')) v = (v && typeof v === 'object') ? v[p] : undefined;
+  if (v === undefined || v === null) return '';
+  return _esc(typeof v === 'object' ? JSON.stringify(v) : String(v));
+}
+
+function _renderDataset(ds) {
+  const fields  = ds.fields || [];
+  const canEdit = ds.permission !== 'read';
+  const head = fields.map(f => `<th>${_esc(f.path)}${f.unit ? ` (${_esc(f.unit)})` : ''}</th>`).join('');
+  const rows = (ds.entries || []).map(e => `<tr>
+      ${fields.map(f => `<td>${_dsCell(e.data, f.path)}</td>`).join('')}
+      <td>${canEdit ? `<button class="outline secondary ds-entry-del" type="button"
+            data-entry-id="${e.id}" title="${t('items.delete_btn')}">✕</button>` : ''}</td>
+    </tr>`).join('');
+  const body = rows || `<tr><td colspan="${fields.length + 1}">${t('items.ds_empty')}</td></tr>`;
+  return `<details class="ds-block" open>
+    <summary>📊 ${_esc(ds.name)} <small>(${(ds.entries || []).length})</small></summary>
+    ${ds.description ? `<small>${_esc(ds.description)}</small>` : ''}
+    <div class="ds-scroll"><table class="ds-table">
+      <thead><tr>${head}<th></th></tr></thead><tbody>${body}</tbody>
+    </table></div>
+  </details>`;
 }
 
 // Kind → emoji icon

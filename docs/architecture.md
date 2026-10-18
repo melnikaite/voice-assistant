@@ -254,6 +254,7 @@ Defined in `storage/schema.py`:
 | `token_usage`          | Per-LLM-call row — prompt, completion, reasoning tokens, attributed to `tool_name` + `client_id`. Feeds `/api/stats`. |
 | `auth_sessions`        | UI cookie-session store (HttpOnly, server-side revocable).                                |
 | `items`, `categories`, `category_shares` | Personal item store: links/notes/media + hierarchical folders + household sharing grants. |
+| `datasets`, `dataset_entries` | Structured JSON datasets owned by a category, one JSON document per entry — see [§14](#14-structured-datasets). |
 | `profile_devices`      | (#50) Maps a `speaker_profile` → the desktop-agent (`device_uid`) that runs its device-tier tools; optional WoL MAC/IP + `is_default`. |
 | `device_pairing_codes` | (#50) Ephemeral single-use 6-digit codes (CSPRNG) binding an agent to a profile over reverse-WSS. 5-min TTL. |
 | `telegram_links`       | Telegram account → `speaker_profile` (UNIQUE `telegram_user_id`, plus `chat_id`). One account per profile; re-linking replaces. |
@@ -603,6 +604,64 @@ language correctly, so this is specific to how `web_search` folds fetched text i
 
 Worth fixing at the summarisation prompt inside the tool rather than in `SYSTEM_PROMPT` —
 the outer instruction is already there and loses to the source material.
+
+## 14. Structured datasets
+
+A category can own several **datasets** — "Utilities" → "Bills", "Meter readings" — for facts
+the user wants to count rather than search.  Code: `app/datasets.py` (schema, validation,
+periods, forecast; pure), `app/storage/datasets.py` (rows, access, `json_extract` aggregation),
+`app/tools/datasets.py` (the `datasets` tool and the context block).
+
+**Shape.** A dataset stores a name, a description, a JSON Schema subset (`object` /
+`properties` / `required`; leaf types `string`, `number`, `integer`, `boolean`, `array`; string
+formats `month` = `YYYY-MM` and `date`; an `x-unit` annotation) and two aggregation hints,
+`amount_field` and `period_field`, guessed from the schema when not given.  Each entry is one
+denormalized JSON document in `dataset_entries.data`, so adding never rewrites the dataset and
+SQLite computes over fields directly.  Nesting is unrestricted; dotted names (`meter.from`)
+address nested fields everywhere.
+
+**Access** follows the owning category and is re-checked on every read and write: the
+category owner has full rights; a `category_shares` grant on the category *or any ancestor*
+gives `read` (stats, forecast, view) or `write` (also add / delete entries).  Schema changes and
+dataset deletion are owner-only.  A deleted category hides its datasets; dataset deletion is
+soft (`deleted_at`).
+
+**Context.** When a category is in focus (the Conversation `list` slot, else the profile's
+last category), `pipeline.py` appends one bracketed line after the focus line: that category's
+datasets with their fields (`*` = required, type, unit), the most frequent stored values of up
+to two required text fields (so filters match what is stored), today's date, and a one-line
+rule for `add`.  Measured cost: ~80 prompt tokens for one dataset; categories without datasets
+cost nothing.
+
+**Asking for missing data.** `add` validates before saving.  Missing or invalid required
+fields → nothing is saved; the tool returns `data["hold"]` with the partial entry, the
+Conversation keeps it for `HELD_TTL_TURNS` turns, and the pipeline hands it back as
+`AgentContext.held` (and names the missing fields in the context line).  The next `add` merges
+the user's answer into the held entry.  Because an 8B model readily fills a month the user
+never said, `add` checks the model's values against `AgentContext.transcript`: a month/date is
+dropped when the utterance names no time at all, an optional text value is dropped when it
+shares no word stem with the utterance, and relative periods ("за прошлый месяц", "letzten
+Monat", "yesterday") are computed by code, overriding the model's arithmetic.
+
+**New fields.** A value with no matching field is never saved silently: `add` enqueues an
+`extend` call (schema extension + the entry) in `pending_actions` and says so; it runs when
+the user approves it like any deferred action.  `create`, `extend` and `delete` are
+`high_write`, so a model-drafted schema also goes through the pending queue unless the speaker
+is authenticated; the `@tool(summary=…)` hook makes the queued readback list the drafted
+fields instead of `k=v` pairs.
+
+**Numbers are code.** `stats` takes `field`, `op` (sum/avg/min/max/count), `group_by`
+(month/quarter/year or any field), equality `filters`, a period keyword (`this_year`,
+`last_month`, …) or explicit bounds, and `include_subtree` (same-named datasets in sub-folders)
+and runs one SQL aggregate.  `forecast` sums the field per month and fits a linear trend plus
+month-of-year seasonal indices (shrunk by k/(k+1) for k observations), with a ≈90 % range from
+the residual spread; under 12 months of data it answers that there is not enough.
+
+**UI.** Selecting a category in the item store shows its datasets as read-only tables with a
+per-entry delete for profiles with write access.
+
+**Measured** with `orchestrator/scripts/datasets_probe.py` against qwen3-vl-8b on LocalAI
+(create, add, missing→ask→answer, stats, forecast with too little data, new field, no share).
 
 ---
 

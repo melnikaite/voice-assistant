@@ -432,6 +432,40 @@ def init_schema() -> None:
                 CREATE INDEX IF NOT EXISTS idx_category_shares_profile
                     ON category_shares(profile_id);
 
+                -- Structured datasets: a category owns several, each with
+                -- a JSON Schema and aggregation hints.  Access follows the
+                -- category (owner + category_shares); soft-deleted like
+                -- categories.
+                CREATE TABLE IF NOT EXISTS datasets (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category_id      INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+                    owner_profile_id INTEGER NOT NULL,
+                    name             TEXT    NOT NULL,
+                    slug             TEXT    NOT NULL,
+                    description      TEXT    NOT NULL DEFAULT '',
+                    schema_json      TEXT    NOT NULL,
+                    amount_field     TEXT,
+                    period_field     TEXT,
+                    created_at       REAL    NOT NULL,
+                    updated_at       REAL    NOT NULL,
+                    deleted_at       REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_datasets_category
+                    ON datasets(category_id, deleted_at);
+
+                -- One denormalized JSON document per fact: adding never
+                -- rewrites the dataset, and stats run on json_extract.
+                CREATE TABLE IF NOT EXISTS dataset_entries (
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dataset_id            INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+                    created_by_profile_id INTEGER,
+                    data                  TEXT    NOT NULL,
+                    created_at            REAL    NOT NULL,
+                    deleted_at            REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_dataset_entries_dataset
+                    ON dataset_entries(dataset_id, deleted_at, created_at);
+
                 -- Profile-device pairing (#50)
                 CREATE INDEX IF NOT EXISTS idx_profile_devices_profile
                     ON profile_devices(profile_id);

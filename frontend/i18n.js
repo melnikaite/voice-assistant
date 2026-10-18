@@ -521,6 +521,8 @@ export const CATALOG = {
   'items.auto_sort_apply':  { en: 'Apply',            ru: 'Применить',          de: 'Anwenden' },
   'items.auto_sort_cancel': { en: 'Cancel',           ru: 'Отмена',             de: 'Abbrechen' },
   'items.error':            { en: 'Error',            ru: 'Ошибка',             de: 'Fehler' },
+  'items.ds_empty':         { en: 'No entries yet.',  ru: 'Записей пока нет.',  de: 'Noch keine Einträge.' },
+  'items.ds_delete_entry_confirm': { en: 'Delete this entry?', ru: 'Удалить эту запись?', de: 'Diesen Eintrag löschen?' },
 
   // ── Live stream panel ───────────────────────────────────────────────
   'stream.stop':        { en: 'Stop',         ru: 'Стоп',          de: 'Stopp' },

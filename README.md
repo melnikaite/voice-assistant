@@ -47,6 +47,10 @@ most tasks.
   semantic via RRF), LLM-powered auto-sort with preview, soft-delete
   trash with 7-day GC.  Items are reachable from both the UI and the
   agent (the LLM can read and write your store).
+- 📊 **Structured datasets** — "start tracking my utility bills:
+  month, service, amount" creates a JSON-schema dataset inside a
+  folder; entries are validated, the bot asks for missing fields, and
+  totals, breakdowns and forecasts are computed by code, not the model.
 - 📬 **Household voicemail** — leave voice messages for another
   household member; speaker-ID routes them, and the recipient gets a
   Web Push with one-tap playback / reply.

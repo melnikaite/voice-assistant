@@ -485,3 +485,41 @@ async def api_auto_sort_apply(
 
     count = await apply_auto_sort(body.suggestions, profile_id)
     return JSONResponse({"ok": True, "moved": count})
+
+
+# ─── Structured datasets (read-only view + entry delete) ─────────────────
+
+
+@router.get("/api/users/{profile_id}/categories/{category_id}/datasets")
+async def api_list_category_datasets(
+    profile_id: int,
+    category_id: int,
+    user: dict = Depends(_current_user),
+) -> JSONResponse:
+    if user["profile_id"] != profile_id:
+        raise HTTPException(403, "cross-profile access not allowed")
+    from ..datasets import flatten
+    from ..storage.datasets import list_datasets, list_entries
+    out = []
+    for ds in await list_datasets(profile_id, category_id):
+        out.append({
+            "id": ds["id"], "name": ds["name"], "description": ds["description"],
+            "permission": ds["permission"],
+            "fields": flatten(ds["schema"]),
+            "entries": await list_entries(profile_id, ds["id"], limit=100) or [],
+        })
+    return JSONResponse({"datasets": out})
+
+
+@router.delete("/api/users/{profile_id}/dataset-entries/{entry_id}")
+async def api_delete_dataset_entry(
+    profile_id: int,
+    entry_id: int,
+    user: dict = Depends(_current_user),
+) -> JSONResponse:
+    if user["profile_id"] != profile_id:
+        raise HTTPException(403, "cross-profile access not allowed")
+    from ..storage.datasets import delete_entry
+    if not await delete_entry(profile_id, entry_id):
+        raise HTTPException(404, "entry not found")
+    return JSONResponse({"ok": True})

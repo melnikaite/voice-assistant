@@ -105,6 +105,12 @@ class AgentContext:
     # Recognised household members on a mixed turn — used to phrase the
     # clarifying question.  Empty on single-speaker turns.
     participants: "tuple[str, ...]" = ()
+    # Partial tool result the Conversation holds across turns (e.g. a
+    # dataset entry waiting for a missing field) — see Conversation.held.
+    held: "dict | None" = None
+    # This turn's user utterance, for tools that check the model's
+    # arguments against what was actually said.  Empty on replays.
+    transcript: str = ""
 
 
 @dataclass
@@ -636,6 +642,12 @@ async def _execute_one(tc: ParsedToolCall, ctx: AgentContext) -> ToolInvocation:
             if isinstance(v, (str, int, float)) and len(str(v)) <= 80
         ]
         summary = f"{tc.name}: " + ", ".join(summary_bits[:4]) if summary_bits else tc.name
+        summarize = meta.get("summary") if meta else None
+        if summarize is not None:
+            try:
+                summary = summarize(tc.args)
+            except Exception:
+                log.debug("agent: summary hook failed for %r", tc.name, exc_info=True)
         try:
             action_id = await enqueue_action(
                 profile_id=ctx.profile_id,

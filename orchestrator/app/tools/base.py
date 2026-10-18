@@ -124,13 +124,16 @@ class ToolCtx:
     ``ctx`` themselves.  This helper is the 90% case.
     """
 
-    __slots__ = ("client_id", "user_lang", "profile_id", "is_authenticated", "_progress_sink", "_stream_sink", "_media_sink")
+    __slots__ = ("client_id", "user_lang", "profile_id", "is_authenticated", "held", "transcript", "_progress_sink", "_stream_sink", "_media_sink")
 
     def __init__(self, ctx: "Any | None"):
         self.client_id = getattr(ctx, "client_id", None) if ctx else None
         self.user_lang = getattr(ctx, "user_lang", None) if ctx else None
         self.profile_id = getattr(ctx, "profile_id", None) if ctx else None
         self.is_authenticated = bool(getattr(ctx, "is_authenticated", False)) if ctx else False
+        # Partial result the conversation holds for this tool (see Conversation.held).
+        self.held = getattr(ctx, "held", None) if ctx else None
+        self.transcript = (getattr(ctx, "transcript", "") or "") if ctx else ""
         self._progress_sink = getattr(ctx, "progress_sink", None) if ctx else None
         self._stream_sink = getattr(ctx, "stream_sink", None) if ctx else None
         self._media_sink = getattr(ctx, "media_sink", None) if ctx else None
@@ -189,6 +192,7 @@ def tool(
     locked_compat: "Literal['always', 'needs_unlock', 'auto_detect']" = "always",
     private: bool = False,
     focus: "dict[str, str] | None" = None,
+    summary: "Callable[[dict], str] | None" = None,
 ):
     """Decorator: register an async function as an LLM-callable tool.
 
@@ -207,6 +211,10 @@ def tool(
     ``{"location": "location"}``) so a later "there" / "туда" resolves to
     it.  Tools can also publish slots at run time via
     ``ToolResult.data["focus"]`` — see :mod:`app.conversation`.
+
+    ``summary`` — optional ``(args) -> str`` used as the pending-queue
+    readback when a ``high_write`` call is deferred; the default joins
+    short ``k=v`` pairs, which hides structured arguments.
 
     ``device_kind`` is required when ``tier="device"``; it names the
     desktop-agent type that must be connected and matching the session's
@@ -263,6 +271,7 @@ def tool(
             "private": private,
             "wants_ctx": "ctx" in sig.parameters,
             "focus": dict(focus or {}),
+            "summary": summary,
         }
         return fn
 

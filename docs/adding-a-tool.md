@@ -112,6 +112,7 @@ Run with `pytest orchestrator/tests/test_dice.py`. The `_fresh_db` fixture in `c
 | `terminal`     | bool   | `True`  | If True, the tool's `text` is the spoken reply and the agent loop ends. If False, the LLM sees the result and may chain. |
 | `risk`         | str    | `"read"`| `"read"` / `"low_write"` / `"high_write"`. Gates execution behind the passphrase. |
 | `focus`        | dict   | `None`  | Argument → conversation-focus slot, e.g. `{"location": "location"}`, so a later "there" / "туда" resolves to it. See `app/conversation.py`. |
+| `summary`      | callable | `None` | `(args) -> str` readback used when a `high_write` call is deferred to `pending_actions`; the default joins short `k=v` pairs and drops structured arguments. |
 
 ### `description` — write for the LLM
 
@@ -161,6 +162,7 @@ Defined in `tools/base.py:59-69`.
 - `text` — spoken via XTTS. Keep it under ~80 words; long lists become unbearable. Speak a summary, dump detail to `data` (see `inbox.py`).
 - `data` — written to `utterances.response_data` in the DB. Use this for anything you'll grep later or display in the UI.
 - `data["focus"]` — `{slot: value}` for focus only the output knows (`list_reminders` publishes the reminder it found). Skipped when `data["error"]` is set.
+- `data["hold"]` — a partial result the conversation keeps until the user answers (`None` clears it); it comes back as `ctx.held` on the next turns. `datasets` uses it for an entry missing a required field. `ctx.transcript` is the user's utterance for this turn, for checking the model's arguments against what was said.
 - `tts_voice_override` — XTTS speaker name to override the user's latched voice for THIS reply. Used by `inbox.py` to play a voicemail summary in the SENDER's cloned voice. Most tools leave it `None`.
 
 ## Calling the LLM from inside a tool
