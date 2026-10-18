@@ -373,6 +373,8 @@ llama.cpp allocates KV up front and attends only over real tokens (measured: 1.4
 | [Holo-3.1-4B](https://huggingface.co/Hcompany/Holo-3.1-4B) Q8_0 | Pointing is fine (6.2 px) and it is cheap (7.7 GB), but it **never reports a missing control** — 0 of 3 — it substitutes the nearest plausible one. Unusable in a closed loop that must know when it cannot see the target. |
 | [Holo-3.1-0.8B](https://huggingface.co/Hcompany/Holo-3.1-0.8B) Q8_0 | The tempting "tiny grounding specialist at 2.2 GB". Pointing 55 px, and worse, it **mixes pixel and normalized coordinate spaces between calls**, so it cannot be calibrated. Reads text acceptably (6/8) but its errors are spatial-association ones — exactly the wrong trade for a grounding role. |
 | Holo-3.1-35B-A3B | 22.2 GB of weights (MoE: all experts must be resident, only compute is 3B) for a non-primary role. Not evaluated — the cost ruled it out first. |
+| Gemma 4 12B QAT q4_0 (2026-10) | Ties Qwen3-VL on tool use (20/20/20 selection ru/de/en, 21/21 arguments, 21/21 end-to-end), reads the screen (8/8) and reports missing controls (3/3) at 9.6 GB — but clicks land **32 px** off against 3 px. Worse, its sliding-window attention makes llama.cpp re-process the whole ~8.5K-token tool catalog every turn unless the server runs with `--swa-full`, which LocalAI does not pass: 50–90 s per turn under load, past the 90 s agent timeout. |
+| [Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) Q4_K_M (2026-10) | No official GGUF; converted with llama.cpp's converter, vision projector included, so it does take images. Lighter (7.9 GB) and clicks well (~5 px), but regresses on tool use: 19/19/19 selection, and it **translates in free text instead of calling `translate`** in every run (18/21 arguments); 2/3 on missing controls. |
 | Qwen3-VL-8B **Q8_0** | Deliberately not evaluated: its only plausible benefit was fixing the timer-argument failure, and that turned out to be a schema problem (below), so no outcome of the test would have changed the decision. |
 | Not installed: Qwen3-VL 2B/4B/30B-A3B/32B and InternVL3.5 14B/30B-A3B (both in the LocalAI gallery), UI-TARS-2B-SFT, ShowUI-2B, OS-Atlas, `locate-anything-3b` | Left on the shelf once Qwen3-VL-8B cleared every bar. Listed so the search does not start from scratch. |
 
@@ -386,12 +388,38 @@ llama.cpp allocates KV up front and attends only over real tokens (measured: 1.4
 6. **Topically varied history breaks referential follow-ups in BOTH models.** "А какая там погода?" after 8 *identical* filler turns resolves fine; after 8 *varied* ones both models answer in free text and call no tool. Depth alone is not the trigger. Model-independent; partly fixed by conversation focus — see §13 and `scripts/context_probe.py`.
 7. **`web_search` replies leak the source language** — asked in Russian, the assistant answered in German and English, against `SYSTEM_PROMPT`'s "reply in the user's language". Also model-independent.
 8. The `general_answer(unknown=true)` → `web_search` chain **never fired** in end-to-end runs: both models route straight to `web_search`. The chaining machinery is correct but effectively unexercised.
+9. **Gemma 4 thinks by default on a plain llama-server** and returns the reasoning as the answer, which gets cut at the token limit: both Gemmas scored 0–2/8 on screen text until the server ran with `--reasoning off`. Check this before blaming a Gemma for bad answers outside LocalAI.
 
-The harness for all of this is worth rebuilding rather than trusting the numbers blind: a
-screenshot with a handful of controls whose pixel centres you read off by hand, the production
-prompt and catalog, three repeats, and — for anything about the agent loop — `run_agent` itself
-rather than a bare `/v1/chat/completions` call. Several conclusions in this section reversed
-when the probe moved closer to production shape.
+The harness is [`scripts/llm_bench/`](../orchestrator/scripts/llm_bench/bench_llm.py): a synthetic
+screenshot with eight controls at known pixel centres, the production prompt and catalog, three
+repeats, and — for anything about the agent loop — `run_agent` itself with tool dispatch stubbed,
+rather than a bare `/v1/chat/completions` call. Several conclusions in this section reversed when
+the probe moved closer to production shape. Re-run on 2026-10 (llama.cpp b11719, each model on its
+own server at 32K), the two usable models reproduced: Qwen3-VL 20/19/20 selection, 21/21 arguments,
+8/8 screen text, 3.0 px clicks, 3/3 missing controls; Gemma 4 E4B 20/20/20, 21/21, 7/8, 37 px, 0/3.
+Latency was not re-measured validly (the runs overlapped another load), so the timing rows above
+stand.
+
+### TTS evaluated
+
+Measured 2026-10 on the same Mac: 10 sentences per language with names, numbers and dates (raw
+digits, as the orchestrator sends them), WER via parakeet with digits expanded on both sides,
+speaker similarity by ECAPA (CAM++ ranks them the same) against one 8 s reference clip of XTTS's
+built-in voice — which flatters XTTS on English, so read the ru/de columns.
+
+| | WER ru / de / en | Similarity ru / de | First audio | RTF | Peak memory |
+|---|---|---|---|---|---|
+| **XTTS-v2** (`xtts-server`, streaming) — kept | **7.1 / 8.0 / 9.5 %** | 0.56 / 0.61 | **1.5 s** | 1.6 | 2.9 GB |
+| Chatterbox Multilingual, mlx-audio | 29.9 / 7.7 / 9.6 % | 0.61 / 0.58 | 2.5 s | 0.8 | 4.7 GB |
+| Chatterbox, official PyTorch on MPS | 37 / 53 / 11 % | 0.65 / 0.78 | 22–31 s (no streaming) | 4.6 | 14 GB |
+| Fun-CosyVoice3 0.5B, official, CPU only | 6.1 / 9.4 / 7.9 % | 0.59 / 0.60 | 24–28 s | 5–6 | 5.9–7.6 GB |
+| Fun-CosyVoice3, mlx-audio-plus fork | 14 / 55 / 50 % | 0.48 / 0.47 | 3–7 s | 0.8 | 4.6 GB |
+
+XTTS stays: it is the only one with sub-2 s first audio and good Russian. Chatterbox reads Russian
+digits in English ("вантайон") and the MPS build appends babble; CosyVoice3 matches XTTS on accuracy
+and cloning but has no MPS path and is ~15x slower here, and needs its cross-lingual mode for ru/de
+(zero-shot with an English reference transcript carries the accent: 47 / 36 % WER). The one mlx
+port of it produces broken audio.
 
 ---
 
