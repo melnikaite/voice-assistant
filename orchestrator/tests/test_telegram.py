@@ -368,3 +368,21 @@ async def test_web_reminder_not_pushed_twice_to_creating_client(monkeypatch):
     with patch("app.registry.push", new=AsyncMock(return_value=True)) as ws_push:
         await scheduler._fire(rid, "browser-1", "y")
     assert [c.args[0] for c in ws_push.await_args_list] == ["browser-1"]
+
+
+def test_log_filter_redacts_bot_token(monkeypatch):
+    import logging
+
+    monkeypatch.setattr(telegram, "TELEGRAM_BOT_TOKEN", "123:SECRET")
+    url = "https://api.telegram.org/bot123:SECRET/getMe"
+    try:
+        raise RuntimeError(f"failed {url}")
+    except RuntimeError:
+        import sys
+        record = logging.LogRecord(
+            "httpx", logging.INFO, __file__, 1, "HTTP Request: %s", (url,), sys.exc_info()
+        )
+    assert telegram._RedactToken().filter(record)
+    formatted = logging.Formatter().format(record)
+    assert "SECRET" not in formatted
+    assert "bot<redacted>/getMe" in formatted

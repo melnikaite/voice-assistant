@@ -544,11 +544,28 @@ def bot_username() -> str | None:
     return _bot.username if _bot else None
 
 
+class _RedactToken(logging.Filter):
+    """The token is part of every Bot API URL, which httpx logs per request."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if TELEGRAM_BOT_TOKEN in msg:
+            record.msg, record.args = msg.replace(TELEGRAM_BOT_TOKEN, "<redacted>"), None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = record.exc_text.replace(TELEGRAM_BOT_TOKEN, "<redacted>")
+        return True
+
+
 def start() -> None:
     """Start polling if ``TELEGRAM_BOT_TOKEN`` is set; otherwise do nothing."""
     global _bot, _task
     if not enabled() or _task is not None:
         return
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, _RedactToken) for f in handler.filters):
+            handler.addFilter(_RedactToken())
     _bot = TelegramBot(TelegramApi(TELEGRAM_BOT_TOKEN))
     _task = asyncio.create_task(_bot.run(), name="telegram-poll")
     log.info("telegram: polling started")
