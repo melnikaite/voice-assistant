@@ -250,6 +250,18 @@ Click the bell icon to grant permission and register the subscription. `frontend
 
 For HTTPS via reverse proxy (caddy / nginx / traefik), point it at `:8080` and forward WebSocket frames with `Connection: Upgrade`. No extra auth wiring needed.
 
+## 10b. Telegram channel (optional)
+
+A Telegram bot as a second front-end to the same assistant: text (emoji, links), photos and image files (vision), voice notes and audio files (same ASR backend; no speaker-ID), `/new` to start a fresh topic.
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and put its token into `.env` as `TELEGRAM_BOT_TOKEN`. Unset = feature off.
+2. Restart the orchestrator (`task restart`). The bot long-polls `api.telegram.org` from inside the orchestrator — outbound HTTPS only, works behind NAT. While offline it retries with backoff; nothing else is affected.
+3. In the web UI, log in, open **Settings → Telegram → Link Telegram**, and open the `t.me/<bot>?start=<token>` link within 5 minutes (or send the shown `/start <token>` to the bot). The token is single-use.
+
+A linked account acts as that profile, authenticated, like the logged-in web UI. Unlinked accounts get only the `/start` reply; the LLM is never called for them. Groups and channels are ignored. Reminders reach every channel of the owning profile, so a profile with a linked account also gets them in Telegram. Unlink from the same Settings section.
+
+Note: Telegram is a cloud service — message content passes through Telegram's servers. Leave the token unset to keep everything local.
+
 ## 11. Multi-agent setup
 
 For multiple agents — home Mac + work PC reachable from the same orchestrator — set `DESKTOP_AGENTS`:

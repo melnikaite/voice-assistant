@@ -119,6 +119,15 @@
             </button>
           </div>
         </div>
+        <!-- Typed turn: same pipeline as a spoken one, reply shown but not
+             spoken.  An attached image applies to it like to a voice turn. -->
+        <div class="grid" style="grid-template-columns: 1fr auto; align-items: end; margin-top: 0.5rem">
+          <textarea id="text-input" rows="1" disabled
+            data-i18n-placeholder="text.placeholder"
+            placeholder="Type a message… (Enter to send, Shift+Enter for a new line)"
+            style="margin:0; resize:vertical"></textarea>
+          <button id="text-send" type="button" disabled data-i18n="text.send" style="margin:0">Send</button>
+        </div>
         <div id="attach-preview" style="display:none; margin-top: 0.5rem; padding: 0.5rem; border:1px dashed var(--pico-muted-border-color); border-radius: 0.4rem">
           <div class="grid" style="grid-template-columns: 64px 1fr auto; gap: 0.5rem; align-items: center">
             <img id="attach-thumb" alt="" style="max-width:64px; max-height:64px; border-radius:0.25rem" />
@@ -419,6 +428,24 @@
             <small id="settings-status" style="color:var(--pico-muted-color); align-self:center"></small>
             <button id="settings-reload" class="outline" type="button" data-i18n="settings.reload">Reload</button>
           </div>
+          <!-- Telegram channel: link this profile to a Telegram account
+               via a single-use 5-min token (see routes/telegram.py). -->
+          <section id="telegram-section" style="display:none; margin-top:1rem">
+            <h6 data-i18n="telegram.title">Telegram</h6>
+            <p><small id="telegram-status" style="color:var(--pico-muted-color)"></small></p>
+            <div id="telegram-link-box" style="display:none">
+              <p>
+                <a id="telegram-link-url" href="#" target="_blank" rel="noopener noreferrer" data-i18n="telegram.open_link">Open in Telegram</a>
+                <br />
+                <small data-i18n="telegram.token_hint">Or send this to the bot:</small>
+                <code id="telegram-link-token"></code>
+              </p>
+            </div>
+            <div class="grid" style="grid-template-columns: auto auto 1fr">
+              <button id="telegram-link-btn" type="button" data-i18n="telegram.link">Link Telegram</button>
+              <button id="telegram-unlink-btn" class="outline secondary" type="button" style="display:none" data-i18n="telegram.unlink">Unlink</button>
+            </div>
+          </section>
         </article>
       </details>
 

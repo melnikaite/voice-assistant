@@ -306,6 +306,7 @@ async function start() {
       stopBtn.disabled = false;
       cancelBtn.disabled = false;
       pttBtn.disabled = false;
+      updateTextInputEnabled();
       try {
         await startWebRtc();
       } catch (err) {
@@ -424,6 +425,7 @@ async function onWsMessage(ev) {
       );
       setState(msg.state);
       serverState = msg.state;
+      updateTextInputEnabled();
       break;
     }
     case 'webrtc_answer':
@@ -447,6 +449,7 @@ async function onWsMessage(ev) {
     case 'state':
       serverState = msg.value;
       setState(msg.value);
+      updateTextInputEnabled();
       if (msg.value === 'continuation' && msg.timeout_s) {
         // Server now controls TTS, so by the time we hit CONTINUATION
         // the audio has already drained — start the countdown now.
@@ -522,6 +525,10 @@ async function onWsMessage(ev) {
       }
       break;
     }
+    case 'text_turn_rejected':
+      log(`text turn rejected${msg.busy ? ' (busy)' : ''}`);
+      if (msg.busy) responseEl.textContent = i18n('text.busy');
+      break;
     case 'response':
       // Display only — TTS audio arrives via the RTC track, not over WS.
       responseEl.textContent = msg.text;
@@ -888,9 +895,44 @@ function cleanup() {
   cancelBtn.disabled = true;
   pttBtn.disabled = true;
   setState('—');
+  updateTextInputEnabled();
   sampleRateEl.textContent = '—';
   if (wakeScoreEl) wakeScoreEl.textContent = '—';
 }
+
+// ── Typed turns ─────────────────────────────────────────────────────────
+// Enabled while connected and idle; disabled during a running turn (the
+// server rejects overlapping turns anyway).  Emoji go through as-is.
+
+const textInputEl = document.querySelector('#text-input');
+const textSendBtn = document.querySelector('#text-send');
+
+function updateTextInputEnabled() {
+  if (!textInputEl) return;
+  const open = !!ws && ws.readyState === WebSocket.OPEN;
+  const idle = serverState === 'listening_wake' || serverState === 'continuation';
+  textInputEl.disabled = !open;
+  textSendBtn.disabled = !(open && idle);
+}
+
+function sendTextTurn() {
+  const text = textInputEl.value.trim();
+  if (!text || textSendBtn.disabled) return;
+  ws.send(JSON.stringify({ type: 'text_turn', text }));
+  textInputEl.value = '';
+  transcriptEl.textContent = '…';
+  responseEl.textContent = '';
+  toolEl.textContent = '';
+  // A staged image is consumed by this turn; response_end hides it.
+}
+
+textSendBtn?.addEventListener('click', sendTextTurn);
+textInputEl?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    sendTextTurn();
+  }
+});
 
 function cancel() {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -2525,6 +2567,7 @@ async function loadSettings() {
     // leaves the existing localStorage/navigator value untouched.  See
     // i18n.js: syncFromSettings handles the de/ru/en cases.
     syncFromSettings(s.language);
+    loadTelegram();
   } catch (e) {
     settingsStatusEl.textContent = i18n('settings.error', { err: e.message });
   }
@@ -2575,6 +2618,58 @@ async function saveSettings() {
 
 settingsSaveBtn?.addEventListener('click', saveSettings);
 settingsReloadBtn?.addEventListener('click', loadSettings);
+
+// ── Telegram link (inside Settings) ─────────────────────────────────────
+// Hidden unless the server has TELEGRAM_BOT_TOKEN.  The token lives only
+// in the t.me deep link the user opens and in the text shown here.
+
+const telegramSectionEl = document.querySelector('#telegram-section');
+const telegramStatusEl  = document.querySelector('#telegram-status');
+const telegramLinkBox   = document.querySelector('#telegram-link-box');
+const telegramLinkUrl   = document.querySelector('#telegram-link-url');
+const telegramLinkToken = document.querySelector('#telegram-link-token');
+const telegramLinkBtn   = document.querySelector('#telegram-link-btn');
+const telegramUnlinkBtn = document.querySelector('#telegram-unlink-btn');
+
+async function loadTelegram() {
+  if (!_currentProfile || !telegramSectionEl) return;
+  try {
+    const r = await fetch('/api/telegram', { credentials: 'same-origin' });
+    if (!r.ok) return;
+    const data = await r.json();
+    telegramSectionEl.style.display = data.enabled ? '' : 'none';
+    telegramLinkBox.style.display = 'none';
+    telegramStatusEl.textContent = data.link
+      ? i18n('telegram.linked_as', { name: data.link.telegram_name || '—' })
+      : i18n('telegram.not_linked');
+    telegramUnlinkBtn.style.display = data.link ? '' : 'none';
+  } catch (e) {
+    log(`telegram: status failed: ${e.message}`);
+  }
+}
+
+async function createTelegramLink() {
+  const r = await fetch('/api/telegram/link-token', {
+    method: 'POST', credentials: 'same-origin',
+  });
+  if (!r.ok) {
+    telegramStatusEl.textContent = i18n('telegram.unavailable');
+    return;
+  }
+  const data = await r.json();
+  telegramLinkUrl.href = data.url;
+  telegramLinkToken.textContent = `/start ${data.token}`;
+  telegramLinkBox.style.display = '';
+  telegramStatusEl.textContent = i18n('telegram.link_ready');
+}
+
+async function unlinkTelegram() {
+  await fetch('/api/telegram/link', { method: 'DELETE', credentials: 'same-origin' });
+  loadTelegram();
+}
+
+telegramLinkBtn?.addEventListener('click', createTelegramLink);
+telegramUnlinkBtn?.addEventListener('click', unlinkTelegram);
 
 // ── Connected devices (Wave 2 Phase 4 agents panel) ────────────────────
 //

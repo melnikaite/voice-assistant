@@ -28,7 +28,9 @@ from .reminders import (
     add_reminder,
     cancel_reminder_db,
     get_missed_reminders,
+    get_missed_reminders_for_profile,
     get_pending_reminders,
+    get_reminder_profile_id,
     list_upcoming_reminders,
     mark_reminder_delivered,
     mark_reminder_fired,
@@ -132,6 +134,15 @@ from .categories import (
     restore_category,
     share_category,
     unshare_category,
+)
+from .telegram_links import (
+    consume_telegram_link_token,
+    create_telegram_link_token,
+    delete_telegram_link_for_profile,
+    get_telegram_link,
+    get_telegram_link_by_chat,
+    get_telegram_link_for_profile,
+    list_telegram_links,
 )
 
 __all__ = [
@@ -244,4 +255,14 @@ __all__ = [
     "share_category",
     "unshare_category",
     "list_category_shares",
+    # telegram links
+    "create_telegram_link_token",
+    "consume_telegram_link_token",
+    "get_telegram_link",
+    "get_telegram_link_by_chat",
+    "get_telegram_link_for_profile",
+    "list_telegram_links",
+    "delete_telegram_link_for_profile",
+    "get_missed_reminders_for_profile",
+    "get_reminder_profile_id",
 ]

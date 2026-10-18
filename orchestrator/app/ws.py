@@ -200,6 +200,9 @@ class Session(PipelineHooks):
         # shows that).
         self.pending_image_b64: str | None = None
         self.pending_image_name: str | None = None
+        # Typed turn: the text replaces ASR for the next _run_pipeline,
+        # and while set the reply is shown but not spoken.
+        self._typed_text: str | None = None
 
     # ------------------------------------------------------------------ #
     # Pipeline hooks
@@ -304,6 +307,8 @@ class Session(PipelineHooks):
         # the audio is already on its way through the RTC track — don't
         # re-synth the whole thing.  The full text comes here only to
         # update the UI card and feed conversation history.
+        if self._typed_text is not None:
+            return  # typed turn: text-only reply
         if self._streaming_response:
             log.info(
                 "session %d: on_response (full text %d chars) — TTS already "
@@ -329,7 +334,7 @@ class Session(PipelineHooks):
         still synthesising — much more responsive than waiting for
         pipeline.run to return.
         """
-        if not text or not self.rtc:
+        if not text or not self.rtc or self._typed_text is not None:
             return
         if not self._streaming_response:
             # First chunk of this turn: flip state to SPEAKING.  The
@@ -381,7 +386,7 @@ class Session(PipelineHooks):
         # tracking would require keeping the previous synth's sample
         # count and re-synthesising only the tail.)
         await self._send({"type": "replay", "mode": mode})
-        if not self.last_response_text:
+        if not self.last_response_text or self._typed_text is not None:
             return
         self._tts_synth_task = asyncio.create_task(
             self._synth_for_playback(self.last_response_text, self.last_response_lang)
@@ -880,6 +885,19 @@ class Session(PipelineHooks):
                     "name": name,
                     "bytes_b64": len(payload),
                 })
+        elif mtype == "text_turn":
+            text = (msg.get("text") or "").strip()
+            busy = self._pipeline_task is not None and not self._pipeline_task.done()
+            if not text or busy or self.state not in (
+                State.LISTENING_WAKE, State.CONTINUATION,
+            ):
+                await self._send({"type": "text_turn_rejected", "busy": busy})
+                return
+            if self._continuation_task and not self._continuation_task.done():
+                self._continuation_task.cancel()
+            self._typed_text = text
+            await self._set_state(State.PROCESSING)
+            self._pipeline_task = asyncio.create_task(self._run_pipeline())
         elif mtype == "detach_image":
             had = self.pending_image_b64 is not None
             self.pending_image_b64 = None
@@ -1021,7 +1039,8 @@ class Session(PipelineHooks):
 
     async def _run_pipeline(self) -> None:
         outcome: PipelineOutcome | None = None
-        self._inflight_audio = bytes(self.cmd_audio)
+        typed_text = self._typed_text
+        self._inflight_audio = b"" if typed_text is not None else bytes(self.cmd_audio)
         self._cancel_reason = None
         # Snapshot the attached image (if any) for THIS turn and clear
         # the slot immediately — even if the pipeline times out we
@@ -1047,6 +1066,7 @@ class Session(PipelineHooks):
                     last_response_text=self.last_response_text,
                     attached_image_b64=attached_image_b64,
                     device_kind=self.device_kind,
+                    text=typed_text,
                 ),
                 timeout=PIPELINE_TIMEOUT_S,
             )
@@ -1077,10 +1097,17 @@ class Session(PipelineHooks):
                 if outcome.last_response_text:
                     self.last_response_text = outcome.last_response_text
             self._inflight_audio = b""
+            self._typed_text = None
             self._reset_for_next_turn()
+            if typed_text is not None:
+                # Nothing was spoken, so no follow-up listening window.
+                try:
+                    await self._set_state(State.LISTENING_WAKE)
+                except Exception:
+                    log.exception("session %d: post-typed-turn transition failed", self.session_id)
             # In the extension case the caller immediately re-enters
             # RECORDING; skip the speaking-then-continuation transition.
-            if self._cancel_reason != "extension":
+            elif self._cancel_reason != "extension":
                 try:
                     await self._start_speaking_then_continuation()
                 except Exception:

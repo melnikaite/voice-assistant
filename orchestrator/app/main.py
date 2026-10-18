@@ -13,7 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response as StarletteResponse
 
-from . import agent_proxy, desktop_client, instance_settings, memory, pending_executor, push, registry, scheduler, speaker, tts
+from . import agent_proxy, desktop_client, instance_settings, memory, pending_executor, push, registry, scheduler, speaker, telegram, tts
 from .search import current_region as _current_search_region
 from .agent import AgentContext
 from .llm import respond
@@ -30,6 +30,7 @@ from .routes import (
     speakers as speakers_routes,
     step_up as step_up_routes,
     stream as stream_routes,
+    telegram as telegram_routes,
     voicemail as voicemail_routes,
     voices as voices_routes,
 )
@@ -185,8 +186,12 @@ async def lifespan(app: FastAPI):
     scheduler.add_periodic(purge_expired_trash, hours=6, job_id="items_trash_gc")
     log.info("starting pending-action executor...")
     pending_executor.start()
+    # Off unless TELEGRAM_BOT_TOKEN is set; polling errors back off inside
+    # the task, so an offline host never blocks or crashes startup.
+    telegram.start()
     log.info("ready (wake detection happens in browser)")
     yield
+    await telegram.stop()
     pending_executor.stop()
     scheduler.stop()
     # Cancel the desktop-agent health-poll task so the orchestrator
@@ -225,6 +230,7 @@ app.include_router(instance_routes.router)
 app.include_router(items_routes.router)
 app.include_router(step_up_routes.router)
 app.include_router(stream_routes.router)
+app.include_router(telegram_routes.router)
 
 
 async def _probe(client: httpx.AsyncClient, url: str, expected_model: str) -> dict:

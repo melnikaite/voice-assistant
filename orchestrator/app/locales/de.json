@@ -205,7 +205,16 @@
     "step_up.pending": "Für den Zugriff auf {tool}-Daten ist deine Genehmigung erforderlich. Schau in deine Push-Benachrichtigung und tippe auf Bestätigen, dann frag erneut.",
     "step_up.no_profile": "Ohne erkanntes Sprachprofil kann keine Genehmigung angefordert werden. Bitte erst Sprachprofil einrichten.",
     "step_up.push_title": "Sprachassistent — Genehmigung erforderlich",
-    "step_up.push_body": "Tippen, um Zugriff auf {tool} zu erlauben."
+    "step_up.push_body": "Tippen, um Zugriff auf {tool} zu erlauben.",
+    "telegram.linked": "Erledigt — dieses Telegram-Konto ist jetzt mit dem Profil {name} verknüpft. Schreib mir einfach hier.",
+    "telegram.already_linked": "Dieses Telegram-Konto ist mit dem Profil {name} verknüpft.",
+    "telegram.link_invalid": "Dieser Verknüpfungscode ist ungültig, abgelaufen oder schon benutzt. Erstelle einen neuen in der Web-App: Einstellungen → Telegram.",
+    "telegram.not_linked": "Dieses Telegram-Konto ist noch mit niemandem verknüpft. Öffne die Web-App, melde dich an, geh zu Einstellungen → Telegram und tippe auf «Telegram verknüpfen».",
+    "telegram.unsupported": "Ich verstehe Text, Links, Fotos, Bilddateien, Sprachnachrichten und Audiodateien.",
+    "telegram.error": "Etwas ist schiefgelaufen — bitte versuch es noch einmal.",
+    "telegram.image_default_prompt": "Was ist auf diesem Bild?",
+    "telegram.audio_failed": "Ich konnte diese Audiodatei nicht lesen.",
+    "telegram.audio_too_long": "Die Aufnahme ist zu lang — bitte unter {minutes} Minuten bleiben."
   },
   "currencies": {
     "names": {

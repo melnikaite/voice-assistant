@@ -256,12 +256,21 @@ class Pipeline:
         last_response_text: str,
         attached_image_b64: str | None = None,
         device_kind: str | None = None,
+        text: str | None = None,
+        identify_speaker: bool = True,
+        voicemail_client_id: str | None = None,
     ) -> PipelineOutcome:
+        # ``text`` is a typed turn (Telegram channel): it replaces ASR, so
+        # ``audio`` is empty and the too-short check does not apply.
+        # ``identify_speaker=False`` is for identified channels whose
+        # profile comes from ``cookie_profile_id`` instead of the voice.
+        # ``voicemail_client_id`` names the client whose enrolled profiles
+        # resolve a voicemail recipient when ``client_id`` is a channel id.
         duration_ms = int(len(audio) / SAMPLE_BYTES_PER_SECOND * 1000)
         record: dict = {
             "session_id": session_id,
             "ts": time.time(),
-            "audio_duration_ms": duration_ms,
+            "audio_duration_ms": None if text is not None else duration_ms,
             "transcript": None,
             "asr_ms": None,
             "llm_ms": None,
@@ -289,7 +298,7 @@ class Pipeline:
         user_lang: str | None = None
 
         try:
-            if duration_ms < MIN_DURATION_MS:
+            if text is None and duration_ms < MIN_DURATION_MS:
                 log.info("session %d skipped: too short (%dms)", session_id, duration_ms)
                 msg = t("pipeline.not_heard", user_lang)
                 await self._hooks.on_response(
@@ -304,11 +313,13 @@ class Pipeline:
             # (~200 ms–5 s), so total latency stays at max(asr, embed).
             spk_task = (
                 asyncio.create_task(speaker.encode_audio_full(audio))
-                if speaker.SPEAKER_ENABLED and client_id
+                if speaker.SPEAKER_ENABLED and client_id and identify_speaker
+                and text is None
                 else None
             )
 
-            await self._hooks.on_progress(step="asr")
+            if text is None:
+                await self._hooks.on_progress(step="asr")
             # No `language=...` lock — Whisper auto-detects per utterance
             # so a Russian-speaking user living in Germany can switch into
             # German mid-conversation and get the right transcription
@@ -319,7 +330,10 @@ class Pipeline:
             # do a better job than a Python pre-filter inside the
             # orchestrator, and don't add a ~120 ms latency hop on the
             # critical ASR path.
-            transcript, asr_ms = await transcribe(audio)
+            if text is None:
+                transcript, asr_ms = await transcribe(audio)
+            else:
+                transcript, asr_ms = text.strip(), 0
             record["transcript"] = transcript
             record["asr_ms"] = asr_ms
             outcome.transcript = transcript
@@ -442,13 +456,17 @@ class Pipeline:
             # otherwise we fall through to the normal agent loop with
             # an explanation, on the theory that the user might have
             # meant something other than voicemail ("pass me the salt").
-            vm = _extract_voicemail(transcript)
+            # Voicemail stores the turn's recording, so a typed turn
+            # (no audio) never takes this branch.
+            vm = _extract_voicemail(transcript) if audio else None
             if vm is not None and client_id:
                 spoken_to, body = vm
                 # Voicemail confirmation language: ``user_lang`` was
                 # resolved from the sender's profile.settings above;
                 # no per-branch re-read needed here.
-                profiles_raw = await get_speaker_profiles(client_id)
+                profiles_raw = await get_speaker_profiles(
+                    voicemail_client_id or client_id
+                )
                 match = _resolve_voicemail_recipient(spoken_to, profiles_raw)
                 if match is None:
                     log.info(

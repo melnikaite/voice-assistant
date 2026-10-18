@@ -11,22 +11,40 @@ from .db import _conn, _lock
 # Write / create
 # ---------------------------------------------------------------------------
 
-def _add_reminder_sync(client_id: str, fire_at: float, push_text: str) -> int:
+def _add_reminder_sync(
+    client_id: str, fire_at: float, push_text: str, profile_id: int | None
+) -> int:
     with _lock:
         c = _conn()
         try:
             cur = c.execute(
-                "INSERT INTO reminders(client_id, fire_at, push_text, created_at)"
-                " VALUES (?, ?, ?, ?)",
-                (client_id, fire_at, push_text, time.time()),
+                "INSERT INTO reminders(client_id, fire_at, push_text, created_at, profile_id)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (client_id, fire_at, push_text, time.time(), profile_id),
             )
             return cur.lastrowid  # type: ignore[return-value]
         finally:
             c.close()
 
 
-async def add_reminder(client_id: str, fire_at: float, push_text: str) -> int:
-    return await asyncio.to_thread(_add_reminder_sync, client_id, fire_at, push_text)
+async def add_reminder(
+    client_id: str, fire_at: float, push_text: str, profile_id: int | None = None
+) -> int:
+    return await asyncio.to_thread(
+        _add_reminder_sync, client_id, fire_at, push_text, profile_id
+    )
+
+
+def _get_profile_id_sync(reminder_id: int) -> int | None:
+    row = _conn().execute(
+        "SELECT profile_id FROM reminders WHERE id=?", (reminder_id,)
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+async def get_reminder_profile_id(reminder_id: int) -> int | None:
+    """Owning profile of a reminder (None for legacy / anonymous ones)."""
+    return await asyncio.to_thread(_get_profile_id_sync, reminder_id)
 
 
 # ---------------------------------------------------------------------------
@@ -153,3 +171,18 @@ def _get_missed_sync(client_id: str) -> list[tuple[int, str]]:
 async def get_missed_reminders(client_id: str) -> list[tuple[int, str]]:
     """Return (id, push_text) for reminders that missed delivery while offline."""
     return await asyncio.to_thread(_get_missed_sync, client_id)
+
+
+def _get_missed_for_profile_sync(profile_id: int) -> list[tuple[int, str]]:
+    since = time.time() - 86400
+    return _conn().execute(
+        "SELECT id, push_text FROM reminders"
+        " WHERE profile_id=? AND fired=1 AND delivered=0 AND fire_at > ?"
+        " ORDER BY fire_at",
+        (profile_id, since),
+    ).fetchall()
+
+
+async def get_missed_reminders_for_profile(profile_id: int) -> list[tuple[int, str]]:
+    """(id, push_text) of a profile's reminders no channel could deliver (last 24 h)."""
+    return await asyncio.to_thread(_get_missed_for_profile_sync, profile_id)

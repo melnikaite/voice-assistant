@@ -128,10 +128,31 @@ async def reload_pending(client_id: str | None = None) -> int:
 
 async def _fire(reminder_id: int, client_id: str, push_text: str) -> None:
     """Called by APScheduler when a job's trigger time arrives."""
-    from . import registry
-    from .storage import mark_reminder_fired  # late import — avoids circular dep
+    from . import registry, telegram
+    from .storage import get_reminder_profile_id, mark_reminder_fired  # late import
 
-    delivered = await registry.push(client_id, push_text, reason="reminder")
+    # Every channel the owning profile has, regardless of which created it:
+    # the creating client, the profile's home client (where it enrolled),
+    # every live tab logged in as the profile, and its Telegram chat.
+    # Clients are de-duplicated so one tab never hears it twice.
+    try:
+        profile_id = await get_reminder_profile_id(reminder_id)
+    except Exception:
+        log.warning("reminder %d: profile lookup failed", reminder_id, exc_info=True)
+        profile_id = None
+    client_ids = [client_id]
+    if profile_id is not None:
+        client_ids += await _profile_client_ids(profile_id)
+    delivered = False
+    for cid in dict.fromkeys(c for c in client_ids if c):
+        if await registry.push(cid, push_text, reason="reminder"):
+            delivered = True
+    if profile_id is not None:
+        try:
+            if await telegram.deliver_to_profile(profile_id, push_text):
+                delivered = True
+        except Exception:
+            log.warning("reminder %d: telegram delivery failed", reminder_id, exc_info=True)
     await mark_reminder_fired(reminder_id, delivered=delivered)
     log.info(
         "reminder %d fired (delivered=%s): %r",
@@ -139,3 +160,31 @@ async def _fire(reminder_id: int, client_id: str, push_text: str) -> None:
         delivered,
         push_text[:60],
     )
+
+
+async def _profile_client_ids(profile_id: int) -> list[str]:
+    """Browser client ids that belong to ``profile_id``: its home client
+    (``speaker_profiles.client_id``) plus every live tab logged in as it.
+
+    ``profile_devices`` is not consulted: its ``device_uid`` is a
+    desktop-agent id, not a client that ``registry.push`` can reach.
+    """
+    from .storage.db import _conn
+    from .ws_registry import _SESSIONS_BY_PROFILE
+
+    ids: list[str] = []
+    try:
+        row = await asyncio.to_thread(
+            lambda: _conn().execute(
+                "SELECT client_id FROM speaker_profiles WHERE id=?", (profile_id,)
+            ).fetchone()
+        )
+        if row and row[0]:
+            ids.append(row[0])
+    except Exception:
+        log.warning("reminder: home client lookup failed", exc_info=True)
+    for session in list(_SESSIONS_BY_PROFILE.get(profile_id, [])):
+        cid = getattr(session, "client_id", None)
+        if cid:
+            ids.append(cid)
+    return ids

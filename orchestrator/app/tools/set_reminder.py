@@ -263,7 +263,9 @@ async def _run(
                 data={"error": f"unknown_trigger:{trigger!r}"},
             )
 
-        reminder_id = await add_reminder(cx.client_id, fire_ts, push_text)
+        reminder_id = await add_reminder(
+            cx.client_id, fire_ts, push_text, profile_id=cx.profile_id
+        )
         sched.schedule(reminder_id, cx.client_id, fire_ts, push_text)
         return ToolResult(
             text=confirm,

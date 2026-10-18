@@ -205,7 +205,16 @@
     "step_up.pending": "I need your device confirmation to read {tool} data. Check your push notification and tap Approve, then ask again.",
     "step_up.no_profile": "I can't request approval without a recognised speaker profile. Please set up your voice profile first.",
     "step_up.push_title": "Voice Assistant — Approval needed",
-    "step_up.push_body": "Tap to allow access to {tool}."
+    "step_up.push_body": "Tap to allow access to {tool}.",
+    "telegram.linked": "Done — this Telegram account is now linked to the profile {name}. Just write to me here.",
+    "telegram.already_linked": "This Telegram account is linked to the profile {name}.",
+    "telegram.link_invalid": "This link code is invalid, expired or already used. Create a new one in the web app: Settings → Telegram.",
+    "telegram.not_linked": "This Telegram account isn't linked to anyone yet. Open the web app, log in, go to Settings → Telegram and press «Link Telegram».",
+    "telegram.unsupported": "I can handle text, links, photos, image files, voice notes and audio files.",
+    "telegram.error": "Something went wrong — please try again.",
+    "telegram.image_default_prompt": "What is in this image?",
+    "telegram.audio_failed": "I couldn't read that audio file.",
+    "telegram.audio_too_long": "That recording is too long — please keep it under {minutes} minutes."
   },
   "currencies": {
     "names": {

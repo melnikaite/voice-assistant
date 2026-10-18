@@ -207,6 +207,9 @@ def init_schema() -> None:
             )
             # ── Phase 2: backfill columns on pre-existing tables ──────────
             _add_columns(c, [
+                # Owning profile: a fired reminder reaches every channel
+                # that profile has (live tab + linked Telegram).
+                ("reminders",        "profile_id",   "INTEGER"),
                 ("sessions",         "client_id",    "TEXT"),
                 # Tool-tiering (#48): what kind of client connected.
                 ("sessions",         "device_kind",  "TEXT"),
@@ -443,6 +446,33 @@ def init_schema() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_step_up_expires
                     ON step_up_grants(expires_at);
+
+                -- Telegram channel: a linked Telegram account maps to
+                -- exactly one speaker_profile (UNIQUE telegram_user_id).
+                -- Rows are written only by consuming a link token minted
+                -- in the web UI for the logged-in profile.
+                CREATE TABLE IF NOT EXISTS telegram_links (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    chat_id          INTEGER NOT NULL,
+                    profile_id       INTEGER NOT NULL REFERENCES speaker_profiles(id) ON DELETE CASCADE,
+                    telegram_name    TEXT    NOT NULL DEFAULT '',
+                    linked_at        REAL    NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_telegram_links_profile
+                    ON telegram_links(profile_id);
+                CREATE INDEX IF NOT EXISTS idx_telegram_links_chat
+                    ON telegram_links(chat_id);
+
+                -- Single-use link tokens (CSPRNG, 5-min TTL), same
+                -- lifecycle as device_pairing_codes.
+                CREATE TABLE IF NOT EXISTS telegram_link_tokens (
+                    token       TEXT    PRIMARY KEY,
+                    profile_id  INTEGER NOT NULL,
+                    expires_at  REAL    NOT NULL,
+                    used        INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_telegram_link_tokens_expires
+                    ON telegram_link_tokens(expires_at);
 
                 -- Housekeeping: drop dead / superseded indexes.
                 --   idx_items_owner_deleted    — replaced by the 3-col
