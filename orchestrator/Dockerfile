@@ -20,25 +20,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
-    'fastapi==0.115.*' \
-    'uvicorn[standard]==0.32.*' \
-    'httpx==0.27.*' \
+    'fastapi==0.146.*' \
+    'uvicorn[standard]==0.54.*' \
+    'httpx==0.28.*' \
     'python-multipart==0.0.*' \
     'numpy<2' \
-    openwakeword \
+    'openwakeword==0.4.*' \
     ddgs \
     'selectolax==0.3.*' \
     'trafilatura>=1.12' \
-    'fastembed==0.4.*' \
-    'apscheduler==3.10.*' \
-    'aiortc>=1.9' \
+    'fastembed>=0.4,<0.4.2' \
+    'apscheduler>=3.11.3,<4' \
+    'aiortc>=1.15' \
     'bcrypt>=4.1' \
-    'pywebpush>=2.0' \
+    'pywebpush>=2.5' \
     'num2words>=0.5.13' \
     'Babel>=2.16' \
     'yt-dlp>=2025.1' \
     'kaldi-native-fbank>=1.22.3' \
-    'onnxruntime>=1.19.2'
+    'onnxruntime>=1.31'
 # Locale-aware helpers:
 #   num2words → "fifteen" / "пятнадцать" / "fünfzehn" — 40+ languages.
 #   Babel     → format_timedelta, currency names, date/time per locale.

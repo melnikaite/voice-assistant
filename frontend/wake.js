@@ -2,7 +2,7 @@
 // pipeline (three ONNX models: melspectrogram → speech embedding → wake).
 // Constants taken from openwakeword/utils.py AudioFeatures.
 
-import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.0/dist/ort.mjs';
+import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.mjs';
 
 const SAMPLE_RATE = 16000;
 const RAW_BUFFER_MAX = SAMPLE_RATE * 10; // 160000
