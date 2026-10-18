@@ -64,8 +64,8 @@ def _get_candidate_utterances_sync(
     Speaker isolation:
     - If ``speaker_name`` is given: return rows for that speaker OR rows
       marked ``is_shared=1`` (explicitly shared across speakers).
-    - If ``speaker_name`` is None (no ID in this session): return all rows
-      (no speaker filter) so the assistant still has full context.
+    - If ``speaker_name`` is None (unidentified speaker): only shared or
+      unattributed rows — never another profile's turns.
     """
     with _lock:
         c = _conn()
@@ -100,6 +100,7 @@ def _get_candidate_utterances_sync(
                       AND  u.embedding IS NOT NULL
                       AND  u.error IS NULL
                       AND  u.transcript IS NOT NULL
+                      AND  (u.is_shared = 1 OR u.speaker_name IS NULL)
                     ORDER  BY u.ts DESC
                     LIMIT  ?
                     """,

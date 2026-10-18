@@ -134,6 +134,21 @@ def _get_by_name_sync(
             c.close()
 
 
+def _get_name_sync(profile_id: int) -> str | None:
+    with _lock:
+        c = _conn()
+        try:
+            row = c.execute("SELECT name FROM speaker_profiles WHERE id=?", (profile_id,)).fetchone()
+            return row[0] if row else None
+        finally:
+            c.close()
+
+
+async def get_speaker_profile_name(profile_id: int) -> str | None:
+    """Name of the profile, or None if it no longer exists."""
+    return await asyncio.to_thread(_get_name_sync, profile_id)
+
+
 async def get_speaker_profile_by_name(
     client_id: str, name: str
 ) -> tuple[int, bytes, int, str | None] | None:

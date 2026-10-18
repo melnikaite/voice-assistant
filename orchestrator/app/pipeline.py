@@ -37,6 +37,7 @@ from .intents import match_intent
 from .user_files import read_settings
 from .storage import (
     get_candidate_utterances,
+    get_speaker_profile_name,
     get_speaker_profiles,
     list_pending_actions,
     list_unseen_replies_for_sender,
@@ -372,6 +373,10 @@ class Pipeline:
                         "session %d: profile %d inherited from cookie (no voice match)",
                         session_id, profile_id,
                     )
+            # Identified without a voice match (cookie, Telegram link): attribute
+            # the turn to that profile so it is not stored as everyone's memory.
+            if speaker_name is None and profile_id is not None and not attr.is_mixed:
+                speaker_name = await get_speaker_profile_name(profile_id)
             record["speaker_name"] = speaker_name
 
             # Resolve user-facing language for THIS turn now that we

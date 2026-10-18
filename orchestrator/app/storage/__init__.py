@@ -38,6 +38,7 @@ from .reminders import (
 from .speaker_profiles import (
     delete_speaker_profile,
     get_speaker_profile_by_name,
+    get_speaker_profile_name,
     get_all_speaker_profiles,
     get_speaker_profiles,
     save_speaker_profile,
@@ -173,6 +174,7 @@ __all__ = [
     "get_all_speaker_profiles",
     "get_speaker_profiles",
     "get_speaker_profile_by_name",
+    "get_speaker_profile_name",
     "set_speaker_tts_voice",
     "delete_speaker_profile",
     # custom voices
