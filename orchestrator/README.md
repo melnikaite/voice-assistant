@@ -32,7 +32,7 @@ orchestrator/
     ├── tts.py             # XTTS-server HTTP client + streaming
     ├── webrtc.py          # aiortc peer + outbound TTS track
     ├── vad.py             # Silero VAD wrapper
-    ├── speaker.py         # resemblyzer GE2E encoder + identify()
+    ├── speaker.py         # WeSpeaker CAM++ (ONNX) encoder + identify()
     ├── memory.py          # fastembed embeddings + cosine retrieval
     ├── i18n.py            # CATALOG[key][lang] + pick_lang/t helpers
     ├── messages.py        # legacy hard-coded reply constants

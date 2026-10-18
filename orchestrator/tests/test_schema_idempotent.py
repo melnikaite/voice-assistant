@@ -46,6 +46,7 @@ async def test_added_columns_exist():
     cols = _columns("speaker_profiles")
     assert "sample_count" in cols
     assert "tts_voice" in cols
+    assert "embedding_model" in cols
 
     cols = _columns("voice_messages")
     assert "reply_delivered_to_sender_at" in cols, (

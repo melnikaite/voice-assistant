@@ -253,6 +253,7 @@ export const CATALOG = {
   // {name} = profile name
   'speaker.saved':             { en: '✅ Profile «{name}» saved!', ru: '✅ Профиль «{name}» сохранён!', de: '✅ Profil «{name}» gespeichert!' },
   'speaker.error':             { en: '❌ Error: {err}',         ru: '❌ Ошибка: {err}',         de: '❌ Fehler: {err}' },
+  'speaker.reenroll_hint':     { en: 'Re-record your voice — not recognised until then', ru: 'Перезапиши голос — до этого он не распознаётся', de: 'Nimm deine Stimme neu auf — bis dahin wird sie nicht erkannt' },
   'speaker.name_required':     { en: 'Enter a name before recording', ru: 'Введи имя перед записью', de: 'Gib einen Namen ein vor der Aufnahme' },
 
   // ── Custom voice (clone) panel ────────────────────────────────────

@@ -55,7 +55,7 @@ Do NOT `c.close()` a connection borrowed from `_conn()`. It's thread-local; clos
 | Tool selection? | [`app/agent.py::run_agent`](app/agent.py), dispatch in [`app/tools/base.py::dispatch`](app/tools/base.py) |
 | Tool schema cache? | [`app/agent.py::_build_cached_schemas`](app/agent.py) — built once, clock placeholder swapped per turn |
 | Offline detection? | [`app/net.py::has_internet`](app/net.py) — cached probe against DuckDuckGo lite |
-| Speaker ID? | [`app/speaker.py`](app/speaker.py) (resemblyzer d-vectors) + [`app/storage/speaker_profiles.py`](app/storage/speaker_profiles.py) |
+| Speaker ID? | [`app/speaker.py`](app/speaker.py) (WeSpeaker CAM++ ONNX) + [`app/storage/speaker_profiles.py`](app/storage/speaker_profiles.py) |
 | Passphrase auth window? | [`app/pipeline.py::_extract_passphrase`](app/pipeline.py) + [`app/user_files.py::verify_passphrase`](app/user_files.py) + [`app/storage/auth_sessions.py`](app/storage/auth_sessions.py) (UI cookie path) |
 | Forgotten code word? | [`app/cli.py`](app/cli.py) — `uv run python -m app.cli reset-passphrase <id\|name>` clears the hash + that profile's sessions |
 | Pending actions? | [`app/storage/pending_actions.py`](app/storage/pending_actions.py) + [`app/pending_executor.py`](app/pending_executor.py) |

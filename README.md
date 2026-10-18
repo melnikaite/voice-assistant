@@ -38,8 +38,8 @@ most tasks.
   6-second sample in the browser to clone any household member's
   voice; the assistant picks the right voice automatically when it
   speaks on someone's behalf.
-- 👥 **Speaker ID** — d-vectors with
-  [resemblyzer](https://github.com/resemble-ai/Resemblyzer), so the
+- 👥 **Speaker ID** — [WeSpeaker](https://github.com/wenet-e2e/wespeaker)
+  CAM++ embeddings (ONNX), so the
   assistant knows who's speaking and routes replies / voice messages
   to the right person.
 - 📦 **Personal item store** — drop links, notes, screenshots,
@@ -253,6 +253,6 @@ own licenses — most notably the XTTS-v2 weights are Coqui CPML
 ## Acknowledgements
 
 This project leans on the work of: OpenAI Whisper, Apple's MLX team,
-Coqui XTTS-v2, openWakeWord, fastembed/Qdrant, resemblyzer, LM Studio
+Coqui XTTS-v2, openWakeWord, fastembed/Qdrant, WeSpeaker, LM Studio
 and Ollama for OpenAI-compatible local serving, and the FastAPI /
 httpx / pyautogui ecosystems.

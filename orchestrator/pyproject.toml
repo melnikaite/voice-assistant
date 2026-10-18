@@ -35,11 +35,9 @@ dependencies = [
     "Babel>=2.16",
     # summarize_url audio/video path
     "yt-dlp>=2025.1",
-    # Speaker ID: GE2E d-vectors.  torch is CPU-bound here (25 MB model);
-    # on macOS the default wheel is fine, on Linux prefer the cpu index
-    # (see Dockerfile) to avoid the CUDA download.
-    "torch",
-    "resemblyzer",
+    # Speaker ID: WeSpeaker CAM++ (ONNX) on Kaldi fbank features — no torch.
+    "kaldi-native-fbank>=1.22.3",
+    "onnxruntime>=1.19.2",
 ]
 
 [project.optional-dependencies]

@@ -221,6 +221,8 @@ def init_schema() -> None:
                 # to xtts-server default" — the UI surfaces this as the
                 # blank/auto option in the voice dropdown.
                 ("speaker_profiles", "tts_voice",    "TEXT"),
+                # Speaker-embedding model id; NULL = legacy resemblyzer.
+                ("speaker_profiles", "embedding_model", "TEXT"),
                 # Reply-replay: timestamp the original sender has been
                 # told the recipient replied to their voicemail.  NULL =
                 # the sender hasn't heard the reply yet; the pipeline's

@@ -59,6 +59,9 @@ os.environ.setdefault("OFFLINE_PROBE_URL", "http://127.0.0.1:0")
 # fixture sweep handles cleanup of the inner ``voice_messages/`` dir.
 os.environ["DATA_DIR_CONTAINER"] = "/tmp/voice-assistant-test-data"
 
+# Never load the real speaker model — tests mock the ONNX session.
+os.environ["SPEAKER_MODEL_PATH"] = "/nonexistent/speaker-model.onnx"
+
 # Make `from app...` resolve to orchestrator/app/.
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))

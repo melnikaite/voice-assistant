@@ -1,11 +1,10 @@
 """
 Mixed-speaker attribution (#59) — split_speakers + _resolve_speaker policy.
 
-The encoder itself (resemblyzer) is heavy and never loaded here; we feed
-synthetic windowed embeddings.  Geometry of the fixtures mirrors real
-d-vector behaviour: same-voice window pairs sit at cos ≈ 0.95, different
-voices at cos ≈ 0.5 — straddling MIXED_HOMOGENEITY (0.70) the same way
-real speakers straddle SPEAKER_THRESHOLD.
+The encoder itself (CAM++) is never loaded here; we feed synthetic windowed
+embeddings.  Same-voice window pairs sit at cos ≈ 0.96, different voices at
+cos ≈ 0 — straddling MIXED_HOMOGENEITY (0.20) the way real speakers straddle
+SPEAKER_THRESHOLD.
 """
 from __future__ import annotations
 
@@ -41,8 +40,9 @@ def _windows(voice: np.ndarray, n: int, jitter: float = 0.15) -> np.ndarray:
 
 
 VOICE_A = _voice(1.0)
-VOICE_B = _voice(0.5)   # cross-voice pairs land at cos ≈ 0.5 < MIXED_HOMOGENEITY
-VOICE_C = _voice(0.3)
+VOICE_B = _voice(0.0)   # cross-voice pairs land at cos ≈ 0 < MIXED_HOMOGENEITY
+VOICE_C = _voice(-0.3)
+STRANGER = np.eye(DIM, dtype=np.float32)[2]  # orthogonal to A, B and C
 
 
 # ── split_speakers ────────────────────────────────────────────────────
@@ -133,8 +133,8 @@ async def test_prosody_clusters_same_profile_stay_single():
     prosody variation — the false-split guard must keep the single path."""
     client = "c-prosody"
     # Enroll the centroid between the two prosody clusters: both clusters
-    # match it at cos ≈ 0.89 ≥ SPEAKER_THRESHOLD while the clusters
-    # themselves sit at cos 0.5 (split fires).
+    # match it at cos ≈ 0.71 ≥ SPEAKER_THRESHOLD while the clusters
+    # themselves sit at cos 0 (split fires).
     p1, p2 = VOICE_A, VOICE_B
     centroid = (p1 + p2) / np.linalg.norm(p1 + p2)
     await save_speaker_profile(client, "alice", centroid.astype(np.float32).tobytes())
@@ -147,7 +147,7 @@ async def test_prosody_clusters_same_profile_stay_single():
 
 async def test_all_unknown_clusters_fall_back_to_none():
     client = "c-strangers"
-    await save_speaker_profile(client, "alice", _voice(-0.5).tobytes())
+    await save_speaker_profile(client, "alice", STRANGER.tobytes())
     partials = np.vstack([_windows(VOICE_A, 4), _windows(VOICE_B, 4)])
     attr = await _resolve(client, partials.mean(axis=0), partials)
     assert attr.mode == "none"

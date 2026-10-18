@@ -36,7 +36,9 @@ RUN pip install --no-cache-dir \
     'pywebpush>=2.0' \
     'num2words>=0.5.13' \
     'Babel>=2.16' \
-    'yt-dlp>=2025.1'
+    'yt-dlp>=2025.1' \
+    'kaldi-native-fbank>=1.22.3' \
+    'onnxruntime>=1.19.2'
 # Locale-aware helpers:
 #   num2words → "fifteen" / "пятнадцать" / "fünfzehn" — 40+ languages.
 #   Babel     → format_timedelta, currency names, date/time per locale.
@@ -58,23 +60,6 @@ RUN pip install --no-cache-dir \
 # in Docker volume cleanup), and inference runs at GPU speed instead
 # of the ~4× RTF we'd hit with CPU-only Docker.
 
-# PyTorch CPU-only build (~300 MB) — required by resemblyzer for the
-# GE2E speaker encoder.  Installing separately so Docker can cache this
-# heavy layer independently.
-RUN pip install --no-cache-dir \
-    torch \
-    --index-url https://download.pytorch.org/whl/cpu
-
-# resemblyzer pulls in webrtcvad which only ships a source tarball — no
-# prebuilt wheels for linux/arm64 + Python 3.12. Install gcc just long enough
-# to compile it, then purge the toolchain so the final image stays slim.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc python3-dev && \
-    pip install --no-cache-dir resemblyzer && \
-    apt-get purge -y gcc python3-dev && \
-    apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
-
 # Pre-download the multilingual embedding model so the image works offline.
 # MiniLM-L12 paraphrase: ~220 MB ONNX. Re-run `docker compose build` if you
 # change EMBEDDING_MODEL (keep this name in sync with docker-compose.yml).
@@ -85,12 +70,13 @@ m = TextEmbedding('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
 list(m.embed(['warmup'])); \
 print('embedding model pre-cached')"
 
-# Pre-download resemblyzer's GE2E speaker encoder weights (~25 MB).
-# Baked into the image so it's available offline.
+# WeSpeaker CAM++ speaker-embedding model (~29 MB ONNX), baked in for offline use.
+ENV SPEAKER_MODEL_PATH=/opt/speaker/voxceleb_CAM++.onnx
 RUN python -c "\
-from resemblyzer import VoiceEncoder; \
-VoiceEncoder(); \
-print('speaker encoder pre-cached')"
+import urllib.request, os; \
+os.makedirs('/opt/speaker', exist_ok=True); \
+urllib.request.urlretrieve('https://huggingface.co/Wespeaker/wespeaker-voxceleb-campplus/resolve/main/voxceleb_CAM%2B%2B.onnx', os.environ['SPEAKER_MODEL_PATH']); \
+print('speaker model pre-cached')"
 
 # No TTS env defaults here — TTS_URL points at the host xtts-server,
 # and is set in docker-compose.yml.

@@ -1271,8 +1271,12 @@ function renderSpeakers(speakers, voices) {
       }).join('');
       optsParts.push(`<optgroup label="${_escapeHtml(i18n('speaker.optgroup_builtin'))}">${builtInOpts}</optgroup>`);
     }
+    // Embedding from an older speaker model: speaker ID skips it until re-recorded.
+    const reenroll = sp.needs_reenroll
+      ? `<br><small style="color:var(--pico-del-color)">${_escapeHtml(i18n('speaker.reenroll_hint'))}</small>`
+      : '';
     li.innerHTML = `
-      <span>${_escapeHtml(sp.name)}${badge}</span>
+      <span>${_escapeHtml(sp.name)}${badge}${reenroll}</span>
       <select data-id="${sp.id}"
         style="padding:0.15rem 0.35rem;font-size:0.75rem;margin:0;min-width:9rem">
         ${optsParts.join('')}

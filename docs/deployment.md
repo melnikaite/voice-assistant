@@ -126,7 +126,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-First boot: builds the orchestrator image (~2 min), creates `data/assistant.db` (SQLite, WAL) and `data/vapid_private.pem` (Web Push key), downloads the fastembed model on first ASR/memory call. Subsequent boots ~5 s.
+First boot: builds the orchestrator image (~2 min), creates `data/assistant.db` (SQLite, WAL) and `data/vapid_private.pem` (Web Push key), downloads the fastembed model on first ASR/memory call. The speaker-ID model is baked into the image. Subsequent boots ~5 s.
 
 Open `http://localhost:8080`. Health-check:
 
@@ -239,6 +239,14 @@ Swap by:
 
 Threshold: `WAKE_WORD_THRESHOLD` (default `0.5`). Higher = fewer false wakes; lower = more sensitive.
 
+## 9b. Speaker ID
+
+Speaker recognition runs WeSpeaker CAM++ (VoxCeleb, 512-dim, ~29 MB ONNX) on onnxruntime in the orchestrator — no torch. The model file lives at `~/.cache/voice-assistant/speaker/voxceleb_CAM++.onnx` (override with `SPEAKER_MODEL_PATH`); `orchestrator/start.sh` downloads it from [Hugging Face `Wespeaker/wespeaker-voxceleb-campplus`](https://huggingface.co/Wespeaker/wespeaker-voxceleb-campplus) on first start, the Docker image bakes it into `/opt/speaker/`. Without the file speaker ID is disabled (log: `speaker encoder unavailable`) and everyone is a guest.
+
+Threshold: `SPEAKER_THRESHOLD` (default `0.55`, cosine on CAM++'s scale — resemblyzer-era values like `0.75` reject almost every genuine match). Higher = fewer wrong-profile matches, more "didn't recognise you". Rationale and numbers: `docs/architecture.md` § Speaker ID.
+
+Each profile records which model produced its embedding. Profiles enrolled with an older model are skipped by speaker ID and marked "re-record your voice" in the Voice profiles panel; recording again under the same name replaces the old embedding.
+
 ## 10. Web Push
 
 Lets the assistant notify you when the tab is closed — voicemail, reminders. Requires:
@@ -313,7 +321,7 @@ task up                         # docker compose start orchestrator on Linux
 
 Restore: stop, untar, start. Schema is idempotent (every migration is `CREATE IF NOT EXISTS`); a backup from an older version gains new columns on first boot of the new orchestrator.
 
-XTTS model (`~/.cache/voice-assistant/xtts/`, 1.8 GB) is reproducible — not in the backup. Same for the fastembed model.
+XTTS model (`~/.cache/voice-assistant/xtts/`, 1.8 GB) is reproducible — not in the backup. Same for the fastembed and speaker-ID models.
 
 ## 14. Troubleshooting
 
@@ -330,6 +338,7 @@ XTTS model (`~/.cache/voice-assistant/xtts/`, 1.8 GB) is reproducible — not in
 | `AppleScript` "Application can't run scripts"   | Automation permission missing for that app        | First AppleScript call against the app triggers a prompt; approve once. |
 | Logs show `i18n: unknown key %r`                | Missing translation for current locale            | Add the key to `orchestrator/app/i18n.py::CATALOG`. `docs/adding-a-locale.md`. |
 | "LLM hit max_tokens"                            | Model thought too long; finished without content  | Lower `reasoning_effort` for that tool, or raise context budget. |
+| Known voice treated as guest                    | Profile marked "re-record your voice", model file missing, or threshold too strict | Re-record in Voice profiles; check the log for `speaker encoder ready`; see § 9b. |
 | Container restart loop                          | Missing env var or DB schema mismatch             | `docker compose logs orchestrator`.                              |
 
 For anything not listed: `docker compose logs -f orchestrator` shows the full pipeline trace (ASR ms, agent loop steps, tool calls, finish reasons, token usage).

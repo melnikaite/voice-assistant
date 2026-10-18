@@ -47,7 +47,7 @@ class AgentContext:
       client_id        Stable per-browser ID, needed by side-effect tools
                        (reminders).
       profile_id       ID of the recognised speaker_profile row, set by
-                       the pipeline after resemblyzer match.  None for an
+                       the pipeline after voice match.  None for an
                        unidentified speaker — Sprint-2 tier-2 features
                        degrade gracefully in that case (memory writes are
                        refused, reminders still work).

@@ -321,8 +321,8 @@ async def inbox_summary(*, ctx, message_id: int) -> ToolResult:
         try:
             profiles = await get_speaker_profiles(cx.client_id)
             sender_voice = next(
-                (tv for pid, _, _, _, tv in profiles
-                 if pid == row["from_profile_id"]),
+                (p[4] for p in profiles
+                 if p[0] == row["from_profile_id"]),
                 None,
             )
         except Exception:

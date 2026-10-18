@@ -1,9 +1,8 @@
 """
 Tests for orchestrator/app/speaker.py — the pure-Python parts.
 
-The encoder (resemblyzer VoiceEncoder) requires PyTorch and a heavy
-model download, so we skip ``init_encoder`` / ``encode_audio`` and test
-:func:`identify` directly with synthetic embeddings.  identify is the
+The encoder needs the CAM++ model file (mocked in test_speaker_model.py),
+so here we test :func:`identify` directly with synthetic embeddings.  identify is the
 hot path: voicemail routing, voice-message replay attribution, and the
 "latch voice" feature in ws.py all rely on it.
 """

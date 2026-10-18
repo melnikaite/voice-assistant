@@ -35,14 +35,15 @@ async def list_speakers(client_id: str | None = None) -> JSONResponse:
     else:
         profiles = await get_all_speaker_profiles()
     cfg = await instance_settings.read()
-    # Row: (id, name, embedding_bytes, sample_count, tts_voice).  NULL
-    # voice means "server default".  has_passphrase picks setup vs login.
+    # NULL voice means "server default".  has_passphrase picks setup vs
+    # login; needs_reenroll flags embeddings from an older speaker model.
     speakers = []
     for p in profiles:
         settings = await read_settings(p[0])
         speakers.append({
             "id": p[0], "name": p[1], "samples": p[3], "voice": p[4],
             "has_passphrase": bool(settings.code_word_hash),
+            "needs_reenroll": not speaker.is_compatible(p[5]),
         })
     return JSONResponse({"speakers": speakers, "registration_open": cfg.registration_open})
 
@@ -57,7 +58,7 @@ async def patch_speaker(profile_id: int, body: SpeakerPatchRequest) -> JSONRespo
     """
     Update a speaker profile.  Today only the per-speaker `tts_voice`
     is mutable; other fields (name, embedding) are write-once via the
-    enrollment flow to keep the d-vector centroid consistent.
+    enrollment flow to keep the embedding centroid consistent.
     """
     voice = body.tts_voice if body.tts_voice else None
     await set_speaker_tts_voice(profile_id, voice)
@@ -77,7 +78,8 @@ async def enroll_speaker(
     If a profile for (client_id, name) already exists the new embedding is
     blended in: ``merged = (old * n + new) / (n + 1)``, then re-normalised.
     This way enrolling multiple samples under the same name converges to a
-    stable centroid rather than creating duplicate profiles.
+    stable centroid rather than creating duplicate profiles.  An embedding
+    from another speaker model is replaced instead (sample count restarts).
 
     ``audio`` must be raw PCM: signed 16-bit, mono, 16 kHz.
     """
@@ -108,14 +110,24 @@ async def enroll_speaker(
         )
 
     existing = await get_speaker_profile_by_name(client_id, name)
+    if existing and not speaker.is_compatible(existing[3]):
+        profile_id = existing[0]
+        await update_speaker_profile(profile_id, emb.tobytes(), 1)
+        log.info(
+            "re-enrolled speaker %r (id=%d) with %s, old embedding replaced",
+            name, profile_id, speaker.MODEL_ID,
+        )
+        return JSONResponse({"ok": True, "id": profile_id, "name": name, "samples": 1})
     if existing:
-        profile_id, old_bytes, n = existing
+        profile_id, old_bytes, n, _ = existing
         old_emb = np.frombuffer(old_bytes, dtype=np.float32)
-        # Running mean: weighted average of old centroid and new sample.
-        merged = (old_emb * n + emb) / (n + 1)
+        # Running mean of unit vectors; CAM++ output is not normalised.
+        old_emb = old_emb / (float(np.linalg.norm(old_emb)) + 1e-9)
+        new_emb = emb / (float(np.linalg.norm(emb)) + 1e-9)
+        merged = (old_emb * n + new_emb) / (n + 1)
         norm = float(np.linalg.norm(merged))
         if norm > 1e-9:
-            merged = merged / norm  # keep as unit d-vector
+            merged = merged / norm  # keep as unit vector
         merged = merged.astype(np.float32)
         await update_speaker_profile(profile_id, merged.tobytes(), n + 1)
         log.info(

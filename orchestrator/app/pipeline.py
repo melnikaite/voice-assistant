@@ -100,8 +100,8 @@ def _resolve_voicemail_recipient(
     initials, longer misses inflected forms.  Ties at Tier 2 are broken
     by shortest enrolled name (closest to the stem).
 
-    ``profiles_raw`` rows are ``(id, name, embedding, sample_count, tts_voice)``
-    — the shape :func:`get_speaker_profiles` returns.
+    ``profiles_raw`` rows are the shape :func:`get_speaker_profiles` returns
+    (id and name first).
     """
     if not name_spoken:
         return None
@@ -359,7 +359,7 @@ class Pipeline:
             speaker_voice = attr.tts_voice
             profile_id = attr.profile_id
             # Cookie fallback: a UI-logged-in user gets tier-2 ability
-            # even if resemblyzer hasn't matched their voice yet.  Only
+            # even if speaker ID hasn't matched their voice yet.  Only
             # used to *fill in* a missing profile_id — never to override
             # a voice-recognised match (which is the stronger signal).
             # Muted on mixed turns (#59): silently attributing a
@@ -899,13 +899,16 @@ class Pipeline:
             spk_emb, partials = await spk_task
             if spk_emb is None or not profiles_raw:
                 return speaker.SpeakerAttribution()
-            # Stored as float32 (resemblyzer's native dtype: 256-dim × 4 B
-            # = 1024 B). Reading as float64 silently halves the dimension.
-            # Row shape: (id, name, embedding_bytes, sample_count, tts_voice).
+            # Stored as float32; reading as float64 silently halves the
+            # dimension.  Profiles from another embedding model live in a
+            # different space and must be re-enrolled, so skip them.
             decoded = [
-                (nm, np.frombuffer(bl, dtype=np.float32))
-                for _, nm, bl, _, _ in profiles_raw
+                (row[1], np.frombuffer(row[2], dtype=np.float32))
+                for row in profiles_raw
+                if speaker.is_compatible(row[5])
             ]
+            if not decoded:
+                return speaker.SpeakerAttribution()
 
             clusters = (
                 speaker.split_speakers(partials) if partials is not None else []
@@ -941,10 +944,10 @@ class Pipeline:
             # typically fit on one hand.
             voice: str | None = None
             profile_id: int | None = None
-            for pid, nm, _, _, tv in profiles_raw:
-                if nm == name:
-                    voice = tv
-                    profile_id = pid
+            for row in profiles_raw:
+                if row[1] == name and speaker.is_compatible(row[5]):
+                    voice = row[4]
+                    profile_id = row[0]
                     break
             log.info(
                 "session %d speaker=%r score=%.3f voice=%r profile=%s",

@@ -111,7 +111,7 @@ services:
       # --- Speaker ID ---
       # Minimum cosine similarity (d-vector) to positively identify a speaker.
       # Same speaker across sessions is typically 0.80+; strangers < 0.70.
-      SPEAKER_THRESHOLD: "0.75"
+      SPEAKER_THRESHOLD: "0.55"
       # --- Web search ---
       # DDG region/language code.  DDG also geo-detects from the calling IP,
       # but the `ddgs` python lib only honours the explicit parameter, so we

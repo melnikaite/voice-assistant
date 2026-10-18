@@ -13,7 +13,7 @@ memory as ``memory_context``?
   its answer.  An explicit tool gives the user a direct "search my
   history for X" knob that's predictable.
 * It is scoped to a STRONGER identity check than memory_context: by
-  ``profile_id`` (resemblyzer + cookie) AND by ``speaker_name`` so
+  ``profile_id`` (voice match + cookie) AND by ``speaker_name`` so
   household members can't accidentally fish each other's past topics.
   memory_context is best-effort and falls back to client-wide search
   when nothing matched.

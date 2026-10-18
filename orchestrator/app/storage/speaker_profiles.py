@@ -4,49 +4,57 @@ from __future__ import annotations
 import asyncio
 import time
 
+from ..speaker import MODEL_ID
 from .db import _conn, _lock
+
+# Rows: (id, name, embedding_bytes, sample_count, tts_voice, embedding_model).
+# embedding_model NULL = enrolled before the model was recorded (resemblyzer).
+ProfileRow = tuple[int, str, bytes, int, "str | None", "str | None"]
 
 
 # ---------------------------------------------------------------------------
 # Write / upsert
 # ---------------------------------------------------------------------------
 
-def _save_sync(client_id: str, name: str, embedding: bytes) -> int:
+def _save_sync(client_id: str, name: str, embedding: bytes, model: str) -> int:
     with _lock:
         c = _conn()
         try:
             cur = c.execute(
-                "INSERT INTO speaker_profiles(client_id, name, embedding, sample_count, created_at)"
-                " VALUES (?, ?, ?, 1, ?)",
-                (client_id, name, embedding, time.time()),
+                "INSERT INTO speaker_profiles(client_id, name, embedding, sample_count,"
+                " created_at, embedding_model) VALUES (?, ?, ?, 1, ?, ?)",
+                (client_id, name, embedding, time.time(), model),
             )
             return cur.lastrowid  # type: ignore[return-value]
         finally:
             c.close()
 
 
-async def save_speaker_profile(client_id: str, name: str, embedding: bytes) -> int:
+async def save_speaker_profile(
+    client_id: str, name: str, embedding: bytes, model: str = MODEL_ID
+) -> int:
     """Insert a brand-new speaker profile (sample_count = 1)."""
-    return await asyncio.to_thread(_save_sync, client_id, name, embedding)
+    return await asyncio.to_thread(_save_sync, client_id, name, embedding, model)
 
 
-def _update_sync(profile_id: int, embedding: bytes, sample_count: int) -> None:
+def _update_sync(profile_id: int, embedding: bytes, sample_count: int, model: str) -> None:
     with _lock:
         c = _conn()
         try:
             c.execute(
-                "UPDATE speaker_profiles SET embedding=?, sample_count=? WHERE id=?",
-                (embedding, sample_count, profile_id),
+                "UPDATE speaker_profiles SET embedding=?, sample_count=?, embedding_model=?"
+                " WHERE id=?",
+                (embedding, sample_count, model, profile_id),
             )
         finally:
             c.close()
 
 
 async def update_speaker_profile(
-    profile_id: int, embedding: bytes, sample_count: int
+    profile_id: int, embedding: bytes, sample_count: int, model: str = MODEL_ID
 ) -> None:
-    """Replace the embedding and sample count for an existing profile."""
-    await asyncio.to_thread(_update_sync, profile_id, embedding, sample_count)
+    """Replace the embedding, sample count and embedding model of a profile."""
+    await asyncio.to_thread(_update_sync, profile_id, embedding, sample_count, model)
 
 
 # ---------------------------------------------------------------------------
@@ -55,12 +63,12 @@ async def update_speaker_profile(
 
 def _get_all_sync(
     client_id: str,
-) -> list[tuple[int, str, bytes, int, str | None]]:
+) -> list[ProfileRow]:
     with _lock:
         c = _conn()
         try:
             rows = c.execute(
-                "SELECT id, name, embedding, sample_count, tts_voice"
+                "SELECT id, name, embedding, sample_count, tts_voice, embedding_model"
                 " FROM speaker_profiles"
                 " WHERE client_id=?"
                 " ORDER BY created_at",
@@ -73,10 +81,11 @@ def _get_all_sync(
 
 async def get_speaker_profiles(
     client_id: str,
-) -> list[tuple[int, str, bytes, int, str | None]]:
+) -> list[ProfileRow]:
     """
-    Return (id, name, embedding_bytes, sample_count, tts_voice) for all
-    enrolled speakers of this client.  ``sample_count`` is how many
+    Return (id, name, embedding_bytes, sample_count, tts_voice,
+    embedding_model) for all enrolled speakers of this client.
+    ``sample_count`` is how many
     enrollment recordings have been averaged into this centroid via
     running-mean; ``tts_voice`` is the XTTS speaker name the household
     member wants to be answered with (NULL = server default).
@@ -84,19 +93,19 @@ async def get_speaker_profiles(
     return await asyncio.to_thread(_get_all_sync, client_id)
 
 
-def _get_instance_sync() -> list[tuple[int, str, bytes, int, str | None]]:
+def _get_instance_sync() -> list[ProfileRow]:
     with _lock:
         c = _conn()
         try:
             return c.execute(
-                "SELECT id, name, embedding, sample_count, tts_voice"
+                "SELECT id, name, embedding, sample_count, tts_voice, embedding_model"
                 " FROM speaker_profiles ORDER BY created_at"
             ).fetchall()  # type: ignore[return-value]
         finally:
             c.close()
 
 
-async def get_all_speaker_profiles() -> list[tuple[int, str, bytes, int, str | None]]:
+async def get_all_speaker_profiles() -> list[ProfileRow]:
     """Every profile on this instance, regardless of the enrolling client.
 
     One household per server, so the login picker shows everyone; speaker
@@ -107,13 +116,13 @@ async def get_all_speaker_profiles() -> list[tuple[int, str, bytes, int, str | N
 
 def _get_by_name_sync(
     client_id: str, name: str
-) -> tuple[int, bytes, int] | None:
-    """Return (id, embedding, sample_count) for the first profile matching (client_id, name)."""
+) -> tuple[int, bytes, int, str | None] | None:
+    """Return (id, embedding, sample_count, embedding_model) for the first match."""
     with _lock:
         c = _conn()
         try:
             row = c.execute(
-                "SELECT id, embedding, sample_count"
+                "SELECT id, embedding, sample_count, embedding_model"
                 " FROM speaker_profiles"
                 " WHERE client_id=? AND name=?"
                 " ORDER BY created_at"
@@ -127,9 +136,9 @@ def _get_by_name_sync(
 
 async def get_speaker_profile_by_name(
     client_id: str, name: str
-) -> tuple[int, bytes, int] | None:
+) -> tuple[int, bytes, int, str | None] | None:
     """
-    Return (profile_id, embedding_bytes, sample_count) for the named speaker,
+    Return (profile_id, embedding_bytes, sample_count, embedding_model) for the named speaker,
     or None if not enrolled.  Used by the enrollment endpoint for running-mean
     averaging across multiple audio samples.
     """

@@ -54,6 +54,7 @@ set -a
 : "${DATA_DIR_HOST:=$ROOT/data}"
 : "${STATIC_DIR:=$ROOT/frontend}"
 : "${FASTEMBED_CACHE_PATH:=$HOME/.cache/voice-assistant/fastembed}"
+: "${SPEAKER_MODEL_PATH:=$HOME/.cache/voice-assistant/speaker/voxceleb_CAM++.onnx}"
 
 # --- behaviour knobs (compose-documented values) -------------------------
 : "${EMBEDDING_MODEL:=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}"
@@ -63,7 +64,7 @@ set -a
 : "${MAX_HISTORY_TURNS:=10}"
 : "${HISTORY_RESUME_MAX_AGE_S:=1800}"
 : "${CONTINUATION_TIMEOUT_S:=10}"
-: "${SPEAKER_THRESHOLD:=0.75}"
+: "${SPEAKER_THRESHOLD:=0.55}"
 : "${VAD_SILENCE_TIMEOUT_S:=1.8}"
 : "${VAD_MIN_SPEECH_S:=0.3}"
 : "${VAD_MAX_RECORD_S:=30}"
@@ -89,6 +90,16 @@ set -a
 set +a
 
 mkdir -p "$DATA_DIR_HOST" "$FASTEMBED_CACHE_PATH"
+
+# WeSpeaker CAM++ speaker-ID model; without it speaker ID stays disabled.
+if [ ! -f "$SPEAKER_MODEL_PATH" ]; then
+  echo "→ downloading speaker model to $SPEAKER_MODEL_PATH…"
+  mkdir -p "$(dirname "$SPEAKER_MODEL_PATH")"
+  curl -fsSL -o "$SPEAKER_MODEL_PATH.part" \
+    "https://huggingface.co/Wespeaker/wespeaker-voxceleb-campplus/resolve/main/voxceleb_CAM%2B%2B.onnx" \
+    && mv "$SPEAKER_MODEL_PATH.part" "$SPEAKER_MODEL_PATH" \
+    || echo "   speaker model download failed — speaker ID disabled"
+fi
 
 echo "→ ensuring venv…"
 uv sync --quiet

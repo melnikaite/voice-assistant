@@ -1163,7 +1163,7 @@ async def handle_ws(
     # resolve it server-side and pin the profile_id on the session
     # *before* the first voice turn lands.  This means a UI-logged-in
     # user gets tier-2 capability from the very first utterance, even
-    # if resemblyzer hasn't matched their voice yet.  Voice-side auth
+    # if speaker ID hasn't matched their voice yet.  Voice-side auth
     # (passphrase spoken aloud) still works in parallel and bumps the
     # 5-minute auth window — they're not mutually exclusive.
     cookie_header = ws.headers.get("cookie") or ""

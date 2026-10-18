@@ -2,7 +2,7 @@
 Per-user file storage — settings.json + memory.md per enrolled profile.
 
 This is the *non-SQLite* half of user identity.  Where the
-``speaker_profiles`` table stores the resemblyzer d-vector + name + ID,
+``speaker_profiles`` table stores the speaker embedding + name + ID,
 ``user_files`` stores everything the assistant should *remember* and
 *honour* about that person:
 

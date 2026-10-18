@@ -59,7 +59,7 @@ Orchestrator never talks to the user directly. Browser is the only client; every
 
 Typical wall-clock budgets on an M-series Mac with a local 4–8B model (Qwen3-VL-8B by default):
 
-- ASR + speaker-ID in parallel (~250 ms). Speaker-ID threshold 0.75 (env: `SPEAKER_THRESHOLD`); same speaker typically 0.80+, different speakers below 0.70.
+- ASR + speaker-ID in parallel (~250 ms; the speaker embedding itself is ~14 ms for a 2 s utterance on CPU). Speaker-ID threshold 0.55 (env: `SPEAKER_THRESHOLD`) — see [Speaker ID](#speaker-id).
 - Agent loop — LLM tool selection + tool dispatch (~1-3 s; dominant cost).
 - TTS first chunk (~300 ms TTFB after the tool returns).
 - Vision-loop fallback adds up to 6 × ~10 s per planning step (§6).
@@ -67,6 +67,22 @@ Typical wall-clock budgets on an M-series Mac with a local 4–8B model (Qwen3-V
 Short-circuits skip the agent loop: `intents.py` catches "повтори"/"новая тема" with zero LLM cost (pipeline.py:663), voicemail-leave skips the agent (pipeline.py:449), an attached image goes straight to vision (pipeline.py:619). Streaming text tools (`web_search`) start TTS mid-LLM-generation via `on_response_chunk` (ws.py:405) — time-to-first-audio ~1.5 s instead of 5 s.
 
 ---
+
+### Speaker ID
+
+[`app/speaker.py`](../orchestrator/app/speaker.py) embeds each utterance with **WeSpeaker CAM++** (VoxCeleb-trained, 512-dim, ONNX on onnxruntime, ~14 ms median for a 2 s clip on Apple-silicon CPU). Front-end: 80-bin Kaldi fbank (25/10 ms, no dither, `kaldi-native-fbank`) on int16-scaled PCM, then per-utterance mean normalisation — identical to the WeSpeaker reference pipeline (cosine 1.0 against torchaudio's fbank). Model file and download: `docs/deployment.md` § 9b. It replaced resemblyzer (GE2E): on public LibriSpeech/MLS/OpenSLR crops (en/de/ru, 80 speakers) CAM++ EER is 0.3–0.7 % at 4 s and 1.7–3.0 % at 1.8 s, against 1.7–2.1 % / 3.4–6.7 %.
+
+**Threshold `SPEAKER_THRESHOLD=0.55`.** CAM++ scores live on a lower scale than resemblyzer's (its EER thresholds are 0.34–0.51), so the old 0.75 would reject most genuine matches. Matching the wrong profile is the costly error (another person's memory, devices, voicemail); a miss only falls back to the guest path. 0.55 on the bench:
+
+| trial                          | FAR     | FRR    |
+|--------------------------------|---------|--------|
+| 4 s enrollment vs 1.8 s query  | 0.04 %  | 8.7 %  |
+| 4 s vs 4 s                     | 0.10 %  | 1.7 %  |
+| 1.8 s vs 1.8 s                 | 0.01 %  | 24 %   |
+
+0.50 halves the short-query FRR (4.9 %) at ~4× the FAR (0.15 %); 0.60 pushes FAR to 0.01 % at 16 % FRR. These are strangers on read speech — family members on one microphone are closer, so re-check on real voices before changing it: each member enrolls one 5 s sample in a quiet room, then speaks ~10 ordinary commands of 1.5–3 s from the usual positions; the log line `speaker=… score=…` gives genuine scores, and commands from member B scored against A's profile (or a guest) give impostor scores. The threshold should sit below nearly all genuine scores and clearly above the highest impostor score.
+
+**Model compatibility.** `speaker_profiles.embedding_model` records which model produced each centroid (`wespeaker-campplus-voxceleb`; NULL = resemblyzer, enrolled before the column existed). Embeddings from different models are different vector spaces and no raw audio is stored, so old profiles cannot be converted: speaker ID skips them, `GET /api/speakers` returns `needs_reenroll: true`, and the Voice profiles panel asks for a new recording. Enrolling under the same name then replaces the old embedding (sample count restarts at 1); further recordings with the same model are running-mean averaged as before.
 
 ## 3. Agent loop
 
@@ -232,7 +248,7 @@ Defined in `storage/schema.py`:
 | `reminders`            | Future-fire reminders; `fired` + `delivered` flags drive the scheduler.                   |
 | `pending_actions`      | Queue of `high_write` tool calls deferred for passphrase approval. TTL via `expires_at`.  |
 | `voice_messages`       | Voicemail audio + transcripts. Inbound (`to_profile_id`) and outbound by direction.       |
-| `speaker_profiles`     | Enrolled household members: name + d-vector centroid + per-speaker TTS voice override.    |
+| `speaker_profiles`     | Enrolled household members: name + speaker-embedding centroid + the model that produced it (`embedding_model`) + per-speaker TTS voice override. |
 | `custom_voices`        | User-recorded XTTS-cloning reference WAVs.                                                |
 | `push_subscriptions`   | Web Push subscriptions (one per browser/device).                                          |
 | `token_usage`          | Per-LLM-call row — prompt, completion, reasoning tokens, attributed to `tool_name` + `client_id`. Feeds `/api/stats`. |
@@ -481,7 +497,7 @@ Everything important runs on `localhost`:
 | LLM (text+vision)| yes (LocalAI default) | Any OpenAI-compatible endpoint                              |
 | TTS              | yes (XTTS-v2)      | —                                                              |
 | Semantic memory  | yes (fastembed MiniLM-L12) | Downloads once (~220 MB ONNX), then offline            |
-| Speaker ID       | yes (resemblyzer)  | —                                                              |
+| Speaker ID       | yes (CAM++ ONNX)   | —                                                              |
 | Storage          | yes (SQLite)       | —                                                              |
 | Desktop control  | yes (desktop-agent) | —                                                             |
 | Reminders        | yes (in-process scheduler) | —                                                      |
@@ -513,11 +529,11 @@ One-line rationale per decision.
 - **WebRTC for audio over binary WebSocket frames.** RTCPeerConnection both ways. Browser's WebRTC voice engine sees TTS as reference audio and runs AEC3 — speaker→mic feedback is cancelled for free, enabling full-duplex barge-in. WS stays as signalling + JSON-events (`ws.py:1-34`).
 - **Host xtts-server over in-container TTS.** PyTorch reaches MPS/CUDA; container can't (`docker-compose.yml:128-143`). 3-5× faster inference, RTF ~0.3 vs ~4.
 - **Reverse-WSS over orchestrator-initiated VPN.** Agent dials orchestrator (`agent_proxy.py`, §9). One env flip and the home agent serves a phone-tethered orchestrator across a coffee-shop NAT. Tailscale is still recommended for the static case (`desktop-agent/README.md:183-189`).
-- **Voice ID as auth, passphrase as escalation.** Speaker recognition (resemblyzer d-vectors) identifies WHO without a credential exchange — enough for `read` and `low_write`. `high_write` requires the passphrase to open a 5-minute auth window (`pipeline.py:60`). Passphrase-on-every-command defeats the "voice is the UI" point; voice-ID-only fails on guests.
+- **Voice ID as auth, passphrase as escalation.** Speaker recognition (CAM++ embeddings) identifies WHO without a credential exchange — enough for `read` and `low_write`. `high_write` requires the passphrase to open a 5-minute auth window (`pipeline.py:60`). Passphrase-on-every-command defeats the "voice is the UI" point; voice-ID-only fails on guests.
 - **Step-up via push-to-device, not a spoken OTP (#55).** Reading private data (`my_history`) needs a second factor a bystander can't overhear. A spoken/heard OTP leaks to anyone in the room; instead we Web-Push a "tap to confirm" to the speaker's own device. Proves *possession of the phone*, not a shared secret. Token travels only in the encrypted push payload + POST body — never a URL — and elevates only the requesting session (§4 step-up gate).
 - **Outer Basic Auth installed at app construction, not in lifespan.** Starlette builds its middleware stack on the first request, which is *after* lifespan startup — so `add_middleware` from inside lifespan silently never wraps requests (or raises). The anti-scanner "door before the house" (#43) is therefore added at module-construction time, reading instance settings synchronously (it already requires a restart to toggle).
 - **Observability from existing rows, no new telemetry pipeline (#46).** `/api/stats` aggregates `token_usage` (cost/tokens) and `utterances` (per-tool latency + error rate) plus a live in-process snapshot (sessions, agents, uptime). No metrics daemon, no external sink — consistent with offline-first; the dashboard is owner-gated behind the `va_session` cookie.
-- **Mixed-utterance attribution via windowed-partials clustering, not diarization (#59).** resemblyzer already computes ~1.6 s window embeddings before averaging them into the utterance d-vector; clustering those windows (seeded 2-means, min-pairwise-cosine homogeneity gate `SPEAKER_MIXED_HOMOGENEITY=0.70`, with blip / same-profile / centroid-proximity guards) detects "two voices in one VAD segment" at zero new dependencies. Empirically: same-voice min-pairwise ≈ 0.69, cross-voice ≈ 0.41 — the guards absorb threshold over-fires. Mixed turns carry no `profile_id`: the cookie fallback is muted, the passphrase auth window is NOT inherited, memory context goes household-wide, and device-tier tools ask whose device instead of guessing (`clarify.which_device`); the existing continuation window catches the answer as a fresh single-speaker turn with its own clean speaker-ID. Real diarization (LocalAI `/v1/audio/diarization`) is Linux-only today — it slots in behind the same `_resolve_speaker` seam later (see `docs/spikes/2026-06-12-localai-spike.md`).
+- **Mixed-utterance attribution via windowed-partials clustering, not diarization (#59).** For clips with at least four 1.6 s windows (0.8 s hop, ≈ 4 s) the encoder also embeds each window in one batched call; clustering those windows (seeded 2-means, min-pairwise-cosine homogeneity gate `SPEAKER_MIXED_HOMOGENEITY=0.20`, with blip / same-profile / centroid-proximity guards) detects "two voices in one VAD segment" at zero new dependencies. On 8 s bench clips: same-voice min-pairwise median ≈ 0.49, two-voice ≈ 0.02 (p99 0.25); at 0.20, 3.8 % of one-voice clips over-fire and 5.4 % of two-voice clips are missed — the guards absorb over-fires. Mixed turns carry no `profile_id`: the cookie fallback is muted, the passphrase auth window is NOT inherited, memory context goes household-wide, and device-tier tools ask whose device instead of guessing (`clarify.which_device`); the existing continuation window catches the answer as a fresh single-speaker turn with its own clean speaker-ID. Real diarization (LocalAI `/v1/audio/diarization`) is Linux-only today — it slots in behind the same `_resolve_speaker` seam later (see `docs/spikes/2026-06-12-localai-spike.md`).
 
 ---
 

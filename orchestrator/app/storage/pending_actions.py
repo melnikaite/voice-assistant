@@ -88,7 +88,7 @@ def _list_pending_sync(
 ) -> list[tuple]:
     """Return all still-pending actions for the (profile, client) pair.
 
-    ``profile_id`` is the strong identity (resemblyzer-matched speaker);
+    ``profile_id`` is the strong identity (voice-matched speaker);
     ``client_id`` is the per-browser stable ID.  We OR them so an
     unidentified speaker can still see their own queued actions tied
     to this browser, and a speaker who moved devices can still see
