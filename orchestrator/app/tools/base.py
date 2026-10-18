@@ -188,6 +188,7 @@ def tool(
     requires_token: "Sequence[str]" = (),
     locked_compat: "Literal['always', 'needs_unlock', 'auto_detect']" = "always",
     private: bool = False,
+    focus: "dict[str, str] | None" = None,
 ):
     """Decorator: register an async function as an LLM-callable tool.
 
@@ -201,6 +202,11 @@ def tool(
 
     ``tier`` controls where the tool may run (see :data:`TierLevel`).
     Default is ``"system"`` — available everywhere, no external dependency.
+
+    ``focus`` maps argument name → conversation-focus slot (e.g.
+    ``{"location": "location"}``) so a later "there" / "туда" resolves to
+    it.  Tools can also publish slots at run time via
+    ``ToolResult.data["focus"]`` — see :mod:`app.conversation`.
 
     ``device_kind`` is required when ``tier="device"``; it names the
     desktop-agent type that must be connected and matching the session's
@@ -256,6 +262,7 @@ def tool(
             "locked_compat": locked_compat,
             "private": private,
             "wants_ctx": "ctx" in sig.parameters,
+            "focus": dict(focus or {}),
         }
         return fn
 

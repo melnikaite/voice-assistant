@@ -287,6 +287,7 @@ async def run_agent(
     ctx: AgentContext,
     history: list[dict] | None = None,
     memory_context: str = "",
+    focus_block: str = "",
 ) -> AgentResult:
     """
     Drive a single user turn through the tool-using LLM until it either:
@@ -312,7 +313,10 @@ async def run_agent(
     messages: list[dict] = [{"role": "system", "content": system}]
     if history:
         messages.extend(history)
-    messages.append({"role": "user", "content": transcript})
+    # Focus goes right before the question: recency beats a system-prompt
+    # line, and a prefix works with every chat template.
+    user_content = f"{focus_block}\n{transcript}" if focus_block else transcript
+    messages.append({"role": "user", "content": user_content})
 
     result = AgentResult(response_text="")
     t0 = time.monotonic()

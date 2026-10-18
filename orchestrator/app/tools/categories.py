@@ -28,6 +28,7 @@ from ..storage.categories import (
     move_category,
     rename_category,
     resolve_category_by_name,
+    set_last_category,
 )
 from .base import RiskLevel, ToolCtx, ToolResult, unwrap_ctx, tool
 
@@ -176,9 +177,10 @@ async def _handle_create(
         parent_id=parent_id,
         kind=kind,
     )
+    await set_last_category(profile_id, cat_id)
     return ToolResult(
         text=t("categories.created", lang, name=name, kind=kind),
-        data={"category_id": cat_id, "name": name, "kind": kind},
+        data={"category_id": cat_id, "name": name, "kind": kind, "focus": {"list": name}},
     )
 
 
@@ -201,7 +203,7 @@ async def _handle_rename(
         return ToolResult(text=t("items.not_found", lang), data={"error": "not_found"})
     return ToolResult(
         text=t("categories.renamed", lang, old=name, new=new_name),
-        data={"category_id": cat["id"], "new_name": new_name},
+        data={"category_id": cat["id"], "new_name": new_name, "focus": {"list": new_name}},
     )
 
 

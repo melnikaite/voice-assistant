@@ -30,18 +30,19 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from .conversation import Conversation
 from .i18n import SUPPORTED_LANGS, t
 from .pipeline import Pipeline
 from .storage import (
     consume_telegram_link_token,
     get_missed_reminders_for_profile,
-    get_recent_history,
     get_telegram_link,
     get_telegram_link_for_profile,
     list_telegram_links,
     mark_reminder_delivered,
     start_session,
 )
+from .storage.sessions import get_recent_turns
 from .user_files import read_settings
 
 log = logging.getLogger(__name__)
@@ -183,7 +184,7 @@ class TelegramApi:
 class ChatState:
     client_id: str
     session_id: int
-    history: list[dict] = field(default_factory=list)
+    conv: Conversation = field(default_factory=Conversation)
     last_response_text: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -229,7 +230,7 @@ class TelegramHooks:
         self.replay = True
 
     async def on_history_reset(self) -> None:
-        self._chat.history.clear()
+        self._chat.conv.reset()
 
     async def on_progress(self, *, step, detail=None) -> None: ...
     async def on_media_started(self, *, url, source) -> None: ...
@@ -404,9 +405,11 @@ class TelegramBot:
 
             cid = client_id_for_chat(chat_id)
             session_id = await start_session(client="telegram", client_id=cid)
-            history = await get_recent_history(cid, max_turns=MAX_HISTORY_TURNS)
+            conv = Conversation.from_rows(
+                await get_recent_turns(cid, max_turns=MAX_HISTORY_TURNS)
+            )
             state = self._chats.setdefault(
-                chat_id, ChatState(client_id=cid, session_id=session_id, history=history)
+                chat_id, ChatState(client_id=cid, session_id=session_id, conv=conv)
             )
         return state
 
@@ -416,7 +419,7 @@ class TelegramBot:
         lang = await _lang_for(profile_id, sender.get("language_code"))
         text = msg.get("text")
         if isinstance(text, str) and _command(text) == "/new":
-            state.history.clear()
+            state.conv.reset()
             await self.send_text(chat_id, t("pipeline.new_topic_confirm", lang))
             return
 
@@ -477,7 +480,8 @@ class TelegramBot:
                     text=text,
                     session_id=state.session_id,
                     client_id=state.client_id,
-                    history=state.history,
+                    history=state.conv.messages(),
+                    conversation=state.conv,
                     last_response_text=state.last_response_text,
                     attached_image_b64=attached_image_b64,
                     identify_speaker=False,
@@ -491,13 +495,9 @@ class TelegramBot:
 
         # Same bookkeeping as ws.Session._run_pipeline.
         if outcome.history_cleared:
-            state.history.clear()
+            state.conv.reset()
         elif outcome.history_appended and outcome.transcript and outcome.response_text:
-            from .ws import MAX_HISTORY_TURNS
-
-            state.history.append({"role": "user", "content": outcome.transcript})
-            state.history.append({"role": "assistant", "content": outcome.response_text})
-            del state.history[: max(0, len(state.history) - MAX_HISTORY_TURNS * 2)]
+            state.conv.record(outcome.transcript, outcome.response_text, outcome.invocations)
 
         if hooks.replay:
             if state.last_response_text:

@@ -367,3 +367,36 @@ async def list_category_shares(category_id: int) -> list[dict]:
     """Return all ``{profile_id, permission, granted_at}`` for a category."""
     rows = await asyncio.to_thread(_list_shares_sync, category_id)
     return [{"profile_id": r[0], "permission": r[1], "granted_at": r[2]} for r in rows]
+
+
+# ── Last-used category (per profile) ─────────────────────────────────────
+# Persisted half of the conversation-focus "list" slot: a new session falls
+# back to it when the message names no category.
+
+def _set_last_sync(profile_id: int, category_id: int) -> None:
+    _conn().execute(
+        "UPDATE speaker_profiles SET last_category_id = ?, last_category_at = ?"
+        "  WHERE id = ?",
+        (category_id, time.time(), profile_id),
+    )
+
+
+async def set_last_category(profile_id: int, category_id: int) -> None:
+    await asyncio.to_thread(_set_last_sync, profile_id, category_id)
+
+
+def _get_last_sync(profile_id: int) -> tuple | None:
+    # Re-checks access: the category may have been deleted or unshared since.
+    return _conn().execute(
+        f"SELECT {', '.join('c.' + col.strip() for col in _SELECT_COLS.split(','))}"
+        "  FROM speaker_profiles p JOIN categories c ON c.id = p.last_category_id"
+        "  WHERE p.id = ? AND c.deleted_at IS NULL"
+        "    AND (c.owner_profile_id = p.id OR c.id IN ("
+        "          SELECT category_id FROM category_shares WHERE profile_id = p.id))",
+        (profile_id,),
+    ).fetchone()
+
+
+async def get_last_category(profile_id: int) -> dict | None:
+    row = await asyncio.to_thread(_get_last_sync, profile_id)
+    return _row_to_dict(row) if row else None

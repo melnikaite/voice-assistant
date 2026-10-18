@@ -45,14 +45,15 @@ from enum import Enum
 from fastapi import WebSocket, WebSocketDisconnect
 
 from . import instance_settings, registry, tts
+from .conversation import Conversation
 from .i18n import t
 from .pipeline import Pipeline, PipelineHooks, PipelineOutcome
 from .storage import (
     get_missed_reminders,
-    get_recent_history,
     mark_reminder_delivered,
     start_session,
 )
+from .storage.sessions import get_recent_turns
 from .vad import VadEndpointer
 from .webrtc import RtcSession
 
@@ -115,14 +116,14 @@ class Session(PipelineHooks):
         ws: WebSocket,
         session_id: int,
         client_id: str | None = None,
-        history: list[dict] | None = None,
+        conversation: Conversation | None = None,
         device_kind: str | None = None,
     ):
         self.ws = ws
         self.client_id = client_id
         self.session_id = session_id
         self.device_kind = device_kind
-        self.history: list[dict] = list(history) if history else []
+        self.conv = conversation or Conversation()
         self.last_response_text: str = ""
         self.last_response_lang: str = "en"
         self._pipeline = Pipeline(hooks=self)
@@ -393,7 +394,7 @@ class Session(PipelineHooks):
         )
 
     async def on_history_reset(self) -> None:
-        self.history.clear()
+        self.conv.reset()
         await self._send({"type": "history_reset"})
 
     async def current_auth_until(self) -> float | None:
@@ -568,12 +569,10 @@ class Session(PipelineHooks):
         self.cmd_audio.clear()
         self.vad = VadEndpointer()
 
-    def _append_history(self, transcript: str, response_text: str) -> None:
-        self.history.append({"role": "user", "content": transcript})
-        self.history.append({"role": "assistant", "content": response_text})
-        max_messages = MAX_HISTORY_TURNS * 2
-        if len(self.history) > max_messages:
-            self.history = self.history[-max_messages:]
+    @property
+    def history(self) -> list[dict]:
+        """Verbatim recent turns (read-only view; mutate via ``self.conv``)."""
+        return self.conv.history
 
     def _reset_for_next_turn(self) -> None:
         self.cmd_audio.clear()
@@ -779,7 +778,7 @@ class Session(PipelineHooks):
                     "session %d: wake during continuation, clearing %d history msgs",
                     self.session_id, len(self.history),
                 )
-                self.history.clear()
+                self.conv.reset()
                 if self._continuation_task and not self._continuation_task.done():
                     self._continuation_task.cancel()
             elif self.state == State.SPEAKING:
@@ -848,7 +847,7 @@ class Session(PipelineHooks):
                 "session %d: client requested history reset (%d msgs)",
                 self.session_id, len(self.history),
             )
-            self.history.clear()
+            self.conv.reset()
             await self._send({"type": "history_reset"})
         elif mtype == "attach_image":
             # User dropped/picked an image to ask about.  We accept either
@@ -1062,7 +1061,8 @@ class Session(PipelineHooks):
                     audio=self._inflight_audio,
                     session_id=self.session_id,
                     client_id=self.client_id,
-                    history=self.history,
+                    history=self.conv.messages(),
+                    conversation=self.conv,
                     last_response_text=self.last_response_text,
                     attached_image_b64=attached_image_b64,
                     device_kind=self.device_kind,
@@ -1091,9 +1091,11 @@ class Session(PipelineHooks):
         finally:
             if outcome is not None:
                 if outcome.history_cleared:
-                    self.history.clear()
+                    self.conv.reset()
                 elif outcome.history_appended and outcome.transcript and outcome.response_text:
-                    self._append_history(outcome.transcript, outcome.response_text)
+                    self.conv.record(
+                        outcome.transcript, outcome.response_text, outcome.invocations,
+                    )
                 if outcome.last_response_text:
                     self.last_response_text = outcome.last_response_text
             self._inflight_audio = b""
@@ -1143,19 +1145,21 @@ async def handle_ws(
         device_kind=device_kind,
     )
 
-    initial_history: list[dict] = []
+    conv = Conversation()
     if client_id:
-        initial_history = await get_recent_history(client_id, max_turns=MAX_HISTORY_TURNS)
-        if initial_history:
+        conv = Conversation.from_rows(
+            await get_recent_turns(client_id, max_turns=MAX_HISTORY_TURNS)
+        )
+        if conv.turn:
             log.info(
-                "ws session %d: restored %d history messages for client %.8s…",
-                session_id, len(initial_history), client_id,
+                "ws session %d: restored %d history turns for client %.8s…",
+                session_id, conv.turn, client_id,
             )
 
     session = Session(
         ws, session_id,
         client_id=client_id,
-        history=initial_history,
+        conversation=conv,
         device_kind=device_kind,
     )
 
@@ -1223,13 +1227,13 @@ async def handle_ws(
 
     log.info(
         "ws connected: session_id=%d client_id=%s history=%d",
-        session_id, (client_id or "")[:8] or "—", len(initial_history),
+        session_id, (client_id or "")[:8] or "—", conv.turn,
     )
     ready_payload: dict = {
         "type": "ready",
         "state": session.state,
         "session_id": session_id,
-        "history_turns": len(initial_history) // 2,
+        "history_turns": conv.turns,
     }
     if device_kind:
         ready_payload["device_kind"] = device_kind

@@ -28,7 +28,7 @@ from ..i18n import t
 from ..items import auto_sort as _auto_sort
 from ..items import ingest as _ingest
 from ..items import search as _search
-from ..storage.categories import resolve_category_by_name
+from ..storage.categories import resolve_category_by_name, set_last_category
 from ..storage.items import (
     create_item,
     delete_item,
@@ -168,6 +168,7 @@ def _items_risk(args: dict) -> RiskLevel:
         "required": ["action"],
     },
     risk=_items_risk,
+    focus={"category": "list"},
 )
 async def items(
     action: str,
@@ -205,6 +206,7 @@ async def items(
         cat_row = await resolve_category_by_name(category, profile_id)
         if cat_row:
             cat_id = cat_row["id"]
+            await set_last_category(profile_id, cat_id)
         elif action in ("save", "move", "update"):
             # Unknown category on a write action — create it on the fly?
             # For now, tell the user and return.  Agent B can add auto-create.

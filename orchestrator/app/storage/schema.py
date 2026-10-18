@@ -223,6 +223,10 @@ def init_schema() -> None:
                 ("speaker_profiles", "tts_voice",    "TEXT"),
                 # Speaker-embedding model id; NULL = legacy resemblyzer.
                 ("speaker_profiles", "embedding_model", "TEXT"),
+                # Last category used by items/categories — seeds the
+                # conversation-focus "list" slot (app/conversation.py).
+                ("speaker_profiles", "last_category_id", "INTEGER"),
+                ("speaker_profiles", "last_category_at", "REAL"),
                 # Reply-replay: timestamp the original sender has been
                 # told the recipient replied to their voicemail.  NULL =
                 # the sender hasn't heard the reply yet; the pipeline's

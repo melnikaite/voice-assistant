@@ -180,9 +180,9 @@ async def test_new_command_clears_history():
     with patch("app.pipeline.run_agent", new=AsyncMock(return_value=AgentResult(response_text="a"))):
         await bot.handle_update(_msg(text="one"))
     state = bot._chats[USER_ID]
-    assert len(state.history) == 2
+    assert len(state.conv.history) == 2
     await bot.handle_update(_msg(text="/new"))
-    assert state.history == []
+    assert state.conv.history == []
 
 
 async def test_photo_goes_to_vision():
@@ -318,7 +318,7 @@ async def test_private_tool_runs_from_telegram_without_step_up_request():
     bot, _ = await _linked_bot(api)
     seen = {}
 
-    async def fake_agent(transcript, *, ctx, history, memory_context):
+    async def fake_agent(transcript, *, ctx, history, memory_context, focus_block=""):
         inv = await _execute_one(ParsedToolCall(id="1", name="test_tg_private", args={}), ctx)
         seen["inv"] = inv
         return AgentResult(response_text=inv.text)

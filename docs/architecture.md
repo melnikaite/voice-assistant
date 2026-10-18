@@ -383,7 +383,7 @@ llama.cpp allocates KV up front and attends only over real tokens (measured: 1.4
 3. **Spoken durations belong in a fixed machine format, not as computed seconds.** `set_timer` takes ISO-8601 (`PT1H30M`); transcription is reliable where arithmetic is not, and it is what Alexa/Lex normalise spoken durations to. Both models: 6/6 with ISO-8601, including "два с половиной часа" → `PT2H30M`.
 4. **Refusal is a model property, not a prompt property**, and single samples mislead — one early run had Mage-VL inventing a click, the opposite of its stable 3/3 behaviour. Repeat before believing any of this.
 5. **§6's `_validate_action` catches destructive verbs, not confident nonsense.** A not-visible path has to be added whichever model is chosen, and can only be delegated to the model when that model actually refuses.
-6. **Topically varied history breaks referential follow-ups in BOTH models.** "А какая там погода?" after 8 *identical* filler turns resolves fine; after 8 *varied* ones both models answer in free text and call no tool. Depth alone is not the trigger. Open bug, model-independent — the harness that found it is worth keeping.
+6. **Topically varied history breaks referential follow-ups in BOTH models.** "А какая там погода?" after 8 *identical* filler turns resolves fine; after 8 *varied* ones both models answer in free text and call no tool. Depth alone is not the trigger. Model-independent; partly fixed by conversation focus — see §13 and `scripts/context_probe.py`.
 7. **`web_search` replies leak the source language** — asked in Russian, the assistant answered in German and English, against `SYSTEM_PROMPT`'s "reply in the user's language". Also model-independent.
 8. The `general_answer(unknown=true)` → `web_search` chain **never fired** in end-to-end runs: both models route straight to `web_search`. The chaining machinery is correct but effectively unexercised.
 
@@ -543,24 +543,26 @@ Reproduced and characterised, not yet fixed.  Both are **model-independent** —
 measured on Gemma 4 E4B and Qwen3-VL-8B alike, so swapping models will not clear them and
 neither should be used as an argument for or against a model.
 
-### TODO: referential follow-ups fail after topically varied history
+### Partly fixed: referential follow-ups after topically varied history
 
-`"А какая там погода?"` after an assistant turn about Munich resolves correctly with a shallow
-history, and still resolves after **8 identical** filler turns.  After **8 topically varied**
-filler turns (different subjects, one per pair), both models return free text and call no tool
-at all — so the user gets a vague answer instead of a weather lookup.
+`"А какая там погода?"` after a turn about Munich resolves with a shallow or repetitive history
+but fails after 8+ topically varied turns: the model answers in free text or picks a recent
+filler subject.  Root cause: history kept only text, so the entity a follow-up needs lived in
+tool arguments the model never saw again.  A second symptom on the same path: "добавь туда
+молоко" was answered "Добавил" with no tool call at all.
 
-Depth alone is not the trigger; diversity is.  This matters because production always sends
-history: `ws.py:62` `MAX_HISTORY_TURNS = 10` → up to 20 messages.
+Fix: `app/conversation.py` — a focus line built from previous tool calls (`@tool(focus=…)`,
+`data["focus"]`) placed right before the question, plus the last `CONVERSATION_KEEP_TURNS`
+turns verbatim and a background list of older subjects.  The "list" slot falls back to the
+profile's last-used category (`speaker_profiles.last_category_id`).  Measured with
+`orchestrator/scripts/context_probe.py` (qwen3-vl-8b, varied filler, N=4/8/16 × 3): 9/36 →
+21/36, claimed-without-tool replies 17 → 1.  Query rewriting, replaying tool calls and a prose
+summary were measured and rejected (no gain or +2–4 s on the voice path).
 
-Reproduce with `run_agent` directly (a bare `/v1/chat/completions` probe shows the same thing
-but is easier to misread): one turn establishing a subject, N filler pairs with *different*
-subjects, then a referential question.  Compare N identical vs N varied.
-
-Candidate directions, none validated: restate the resolved subject in the user message before
-the model sees it; summarise rather than replay old turns; or drop filler turns that carry no
-entities.  `SYSTEM_PROMPT` already instructs the model to "expand the topic in the tool
-arguments" — the instruction is present and ignored, so prompt wording alone is unlikely to fix it.
+Still open: the reminder follow-up ("напомни об этом") — the model writes the pronoun into
+`text` although the focus line names the reminder; subjects that never went through a
+slot-mapped tool (Munich via `general_answer`) survive only via the summary and are lost
+after ~16 turns.
 
 ### TODO: `web_search` replies leak the source language
 

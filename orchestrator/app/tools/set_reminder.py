@@ -166,7 +166,8 @@ async def _run(
                 "reminders.list_many", lang,
                 count=len(entries), joined="; ".join(entries),
             )
-        return ToolResult(text=reply, data={"reminders": upcoming})
+        # The soonest one is what "remind me about it" most likely means.
+        return ToolResult(text=reply, data={"reminders": upcoming, "focus": {"reminder": entries[0]}})
 
     # ── cancel ────────────────────────────────────────────────────────────
     if action == "cancel":
@@ -320,6 +321,7 @@ _LABEL_DESC = (
         "required": ["duration"],
     },
     risk="low_write",
+    focus={"text": "reminder"},
 )
 async def set_timer(*, ctx, duration: str, text: str | None = None) -> ToolResult:
     seconds = _parse_iso_duration(duration)
@@ -357,6 +359,7 @@ async def set_timer(*, ctx, duration: str, text: str | None = None) -> ToolResul
         "required": ["fire_at"],
     },
     risk="low_write",
+    focus={"text": "reminder"},
 )
 async def set_reminder_at(*, ctx, fire_at: str, text: str | None = None) -> ToolResult:
     return await _run(
@@ -398,6 +401,7 @@ async def list_reminders(*, ctx) -> ToolResult:
         "required": ["text"],
     },
     risk="low_write",
+    focus={"text": "reminder"},
 )
 async def cancel_reminder(*, ctx, text: str) -> ToolResult:
     return await _run(ctx=ctx, action="cancel", text=text)

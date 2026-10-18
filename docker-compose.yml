@@ -86,8 +86,10 @@ services:
       # value is honest "real silence" time, not "silence while assistant
       # was still talking".
       CONTINUATION_TIMEOUT_S: "10"
-      # How many turns (user + assistant pairs) to keep as conversation context.
+      # How many turns (user + assistant pairs) to restore on reconnect.
       MAX_HISTORY_TURNS: "10"
+      # Turns the model sees verbatim; older ones fold into a running summary.
+      CONVERSATION_KEEP_TURNS: "6"
       # How long (seconds) to look back when restoring history on reconnect.
       # After this window the session starts fresh; semantic memory still works.
       HISTORY_RESUME_MAX_AGE_S: "1800"

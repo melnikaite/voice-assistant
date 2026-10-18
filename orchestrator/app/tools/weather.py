@@ -134,6 +134,7 @@ def _format_reply(
         "required": ["location"],
     },
     risk="read",
+    focus={"location": "location"},
 )
 async def weather(location: str, *, ctx=None) -> ToolResult:
     cx = unwrap_ctx(ctx)

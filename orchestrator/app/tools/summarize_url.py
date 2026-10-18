@@ -69,6 +69,7 @@ log = logging.getLogger(__name__)
     },
     risk="read",
     tier="system",
+    focus={"url": "url"},
 )
 async def summarize_url(
     url: str,

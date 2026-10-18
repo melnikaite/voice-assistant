@@ -24,7 +24,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
@@ -32,6 +32,7 @@ import numpy as np
 from . import i18n, memory, speaker, vision
 from .agent import AgentContext, AgentResult, run_agent
 from .asr import transcribe
+from .conversation import Conversation
 from .i18n import pick_lang, t
 from .intents import match_intent
 from .user_files import read_settings
@@ -46,6 +47,7 @@ from .storage import (
     save_voice_message,
 )
 from .user_files import verify_passphrase
+from .storage.categories import get_last_category
 
 log = logging.getLogger(__name__)
 
@@ -236,6 +238,8 @@ class PipelineOutcome:
     # the message author's voice).  Plumbed into ``on_response`` via
     # the WS layer's hook; no other branch sets it today.
     tts_voice_override: str | None = None
+    # Tool calls of this turn, for ``Conversation.record`` (focus slots).
+    invocations: list = field(default_factory=list)
 
 
 class Pipeline:
@@ -260,6 +264,7 @@ class Pipeline:
         text: str | None = None,
         identify_speaker: bool = True,
         voicemail_client_id: str | None = None,
+        conversation: "Conversation | None" = None,
     ) -> PipelineOutcome:
         # ``text`` is a typed turn (Telegram channel): it replaces ASR, so
         # ``audio`` is empty and the too-short check does not apply.
@@ -801,11 +806,20 @@ class Pipeline:
                 mixed=attr.is_mixed,
                 participants=attr.participants,
             )
+            focus_block = ""
+            if conversation is not None:
+                fallback: dict[str, str] = {}
+                if profile_id is not None and "list" not in conversation.focus:
+                    last_cat = await get_last_category(profile_id)
+                    if last_cat:
+                        fallback["list"] = last_cat["name"]
+                focus_block = conversation.focus_block(fallback)
             agent_result: AgentResult = await run_agent(
                 transcript,
                 ctx=ctx,
                 history=history,
                 memory_context=memory_context,
+                focus_block=focus_block,
             )
             last = agent_result.last_tool
             record["llm_ms"] = agent_result.elapsed_ms
@@ -818,6 +832,7 @@ class Pipeline:
             outcome.last_response_text = agent_result.response_text
             outcome.history_appended = True
             outcome.tts_voice_override = agent_result.tts_voice_override
+            outcome.invocations = agent_result.invocations
 
             await self._hooks.on_tool_called(
                 name=last.name if last else None,

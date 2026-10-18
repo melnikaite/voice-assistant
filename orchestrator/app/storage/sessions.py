@@ -43,17 +43,17 @@ async def start_session(
 
 def _get_recent_history_sync(
     client_id: str, max_turns: int, since_ts: float
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, str | None, str | None]]:
     """
-    Return up to ``max_turns`` (transcript, response_text) pairs for
-    ``client_id`` from the given time window, newest first.
+    Return up to ``max_turns`` (transcript, response_text, tool_name,
+    tool_args) rows for ``client_id`` from the given time window, newest first.
     """
     with _lock:
         c = _conn()
         try:
             rows = c.execute(
                 """
-                SELECT u.transcript, u.response_text
+                SELECT u.transcript, u.response_text, u.tool_name, u.tool_args
                 FROM   utterances u
                 JOIN   sessions s ON u.session_id = s.id
                 WHERE  s.client_id = ?
@@ -84,7 +84,17 @@ async def get_recent_history(
         _get_recent_history_sync, client_id, max_turns, since_ts
     )
     history: list[dict] = []
-    for transcript, response_text in reversed(rows):  # oldest first
+    for transcript, response_text, _tool, _args in reversed(rows):  # oldest first
         history.append({"role": "user", "content": transcript})
         history.append({"role": "assistant", "content": response_text})
     return history
+
+
+async def get_recent_turns(client_id: str, max_turns: int) -> list[tuple]:
+    """Like :func:`get_recent_history` but oldest-first raw rows including the
+    turn's last tool call — input for ``Conversation.from_rows``."""
+    since_ts = time.time() - HISTORY_RESUME_MAX_AGE_S
+    rows = await asyncio.to_thread(
+        _get_recent_history_sync, client_id, max_turns, since_ts
+    )
+    return list(reversed(rows))
