@@ -156,10 +156,10 @@ async def calendar_free_busy(profile_id: int) -> str | None:
 CONTEXT_PROMPT = (
     "A person's real reply to a situation depends on something their persona cannot "
     "know.  You get the situation, what the reply depends on, and the person's busy "
-    "times.  If the busy times settle it, answer with one short sentence stating only "
-    "the conclusion (for example \"free tomorrow from 14:00 to 16:00\"), in the "
-    "language of the dependency, never listing the schedule.  If they do not, answer "
-    "NONE."
+    "times.  If the busy times settle it, answer with one short sentence that answers "
+    "the condition itself (for example \"14:55-15:25 tomorrow is free\" or \"Tuesday "
+    "15:00 is taken\"), in the language of the dependency, never listing the schedule "
+    "or a wider free window.  If they do not, answer NONE."
 )
 
 

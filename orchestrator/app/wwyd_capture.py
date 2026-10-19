@@ -30,8 +30,6 @@ log = logging.getLogger(__name__)
 # Turns whose wwyd effect is explicit already.
 _SKIP_TOOLS = {"wwyd_remember", "how_would_answer"}
 _MAX_QUEUE = 20
-# A dictated message is a reply whose incoming message we never saw.
-MESSAGE_SITUATION = "The owner dictates a message to their voice assistant to send to someone."
 
 # Cheap gate before spending an LLM call: the owner speaks in the first
 # person, or tells someone something.
@@ -132,14 +130,13 @@ async def _episodes(profile_id: int, items: list[dict], ts: str) -> list[dict]:
         if it["type"] == "note":
             episodes.append({"when": ts, "said": it["text"]})
             continue
-        ep = {"when": ts, "situation": MESSAGE_SITUATION, "said": it["text"]}
         to = it["to"].lower()
         # Recipient name → household profile → owner's audience; names never leave.
         pid = next((p for p, n in profiles if to and (n.lower() == to or n.lower()[:3] == to[:3])), None)
         aud = amap.get(f"profile:{pid}") if pid is not None else None
-        if aud:
-            ep["audience"] = aud
-        episodes.append(ep)
+        # said + audience without situation is an outgoing message; without the
+        # audience wwyd would read it as a statement about the owner.
+        episodes.append({"when": ts, "said": it["text"], "audience": aud or "default"})
     return episodes
 
 

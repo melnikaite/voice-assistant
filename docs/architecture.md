@@ -740,7 +740,7 @@ argument is ignored) and always hears wwyd's `disclosure` first.  wwyd's answer 
 sendable; when it comes with `depends_on` (plain words: what the real answer depends on),
 the target's own paired Mac is asked for busy times — a fixed read-only AppleScript, start/end
 for 7 days, never titles, attendees or places — and the local LLM turns them into a one-line
-conclusion ("free tomorrow from 14:00 to 16:00") or NONE.  Only that conclusion goes back to
+answer to the condition itself ("14:55-15:25 tomorrow is free") or NONE.  Only that conclusion goes back to
 `predict` as `context`; without a Mac, or when the calendar does not settle it, the first
 answer stands.  Whether to auto-reply or
 draft stays with the assistant; this tool only speaks the prediction.
@@ -756,9 +756,9 @@ per profile) by exact path, leaf name or parent, else `communication/style`.
 regex skips most turns, and an in-memory per-profile drain — the conversation summary
 fold's pattern — asks the LLM which parts are the owner's own words: dictated messages
 or statements about themselves.  Requests to the assistant are dropped.  Items go to
-`ingest_raw` as wwyd episodes: a dictated message is a reply (`situation` says it was
-dictated, `said` is the text, audience from the recipient's mapping); a statement is `said`
-alone.  No category is sent: wwyd places episodes itself, and a path made up here could
+`ingest_raw` as wwyd episodes: a dictated message is an outgoing message (`said` with
+the recipient's mapped audience, `default` when unmapped, no `situation`); a statement is
+`said` alone.  No category is sent: wwyd places episodes itself, and a path made up here could
 carry a name.  wwyd derives claims that land PENDING for review in wwyd.  Unstripped code-word attempts, mixed
 turns, guests and turns that already used a wwyd tool are never sent.
 

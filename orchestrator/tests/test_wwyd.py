@@ -471,10 +471,18 @@ async def test_capture_ingests_owner_words_with_mapped_audience(fake, fake_class
     name, args = fake.calls[-1]
     assert name == "ingest_raw"
     msg, note = args["episodes"]
-    assert msg == {"when": msg["when"], "situation": wwyd_capture.MESSAGE_SITUATION,
-                   "said": "I'll be late, sorry", "audience": "family"}
+    assert msg == {"when": msg["when"], "said": "I'll be late, sorry", "audience": "family"}
     assert "Anna" not in json.dumps(args)
     assert note == {"when": note["when"], "said": "I never take calls before 10"}
+
+
+async def test_capture_unmapped_recipient_stays_an_outgoing_message(fake, fake_classifier):
+    owner = await _profile("Eugene")
+    await _connect(owner)
+    wwyd_capture.observe(owner, False, "tell Anna I'll be late, sorry")
+    await wwyd_capture.wait_idle()
+    msg, _ = fake.calls[-1][1]["episodes"]
+    assert msg["audience"] == "default" and "situation" not in msg
 
 
 async def test_capture_is_owner_only(fake, fake_classifier):
