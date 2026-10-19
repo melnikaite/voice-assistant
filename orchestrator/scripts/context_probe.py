@@ -456,6 +456,35 @@ def _alt(topic: bool, reword: bool) -> Variant:
     return f
 
 
+_RU_LINE = ("[Фокус разговора — если в сообщении «там/туда/это/об этом» или не назван "
+            "объект, подставь эти значения в аргументы инструмента вместо местоимения: ")
+_RU_REWORD = ("[Фокус разговора — «там/туда/это/об этом» относится к последнему упомянутому. "
+              "Бери значение ниже, только если прошлый ответ не назвал другое место или "
+              "объект (ответ про Рим → «там» = Рим); чем меньше ходов назад, тем важнее: ")
+
+
+def _ru(head: str) -> Variant:
+    """phase2 with the focus line written in Russian (the probe's turn language)."""
+    async def f(turns, q):
+        from app import conversation
+        orig = conversation.Conversation.focus_block
+
+        def fb(self, fallback=None):
+            live = {s: e for s, e in self.focus.items()
+                    if self.turn - e.turn < conversation.FOCUS_TTL_TURNS}
+            parts = [f"{s}={e.value!r} ({e.tool}, ходов назад: {self.turn - e.turn + 1})"
+                     for s, e in sorted(live.items(), key=lambda kv: -kv[1].turn)]
+            parts += [f"{s}={v!r} (последнее)" for s, v in (fallback or {}).items()
+                      if s not in live and v]
+            return head + "; ".join(parts) + "]" if parts else ""
+        conversation.Conversation.focus_block = fb
+        try:
+            return await v_phase2(turns, q)
+        finally:
+            conversation.Conversation.focus_block = orig
+    return f
+
+
 def _capped(v: Variant, max_turns: int = 10) -> Variant:
     """Apply production's MAX_HISTORY_TURNS window before the variant runs."""
     async def f(turns, q):
@@ -482,6 +511,8 @@ VARIANTS: dict[str, Variant] = {
     "topic": _alt(True, False),
     "reword": _alt(False, True),
     "topic_reword": _alt(True, True),
+    "ru_line": _ru(_RU_LINE),
+    "ru_reword": _ru(_RU_REWORD),
 }
 
 

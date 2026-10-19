@@ -604,7 +604,8 @@ Still open: a stale slot hijacks a pronoun whose referent is the previous turn. 
 `stale_place` probe case (weather for Munich, fillers, then a `general_answer` turn about
 Lisbon, then "А какая там погода?") passes only at N=16, where the Munich slot has expired;
 at N=4/8 weather is called for Munich or answered in free text (0/6).  Three fixes were
-measured (qwen3-vl-8b, varied filler, N=4/8/16 × 3) and none moved it:
+measured (qwen3-vl-8b, varied filler, N=4/8/16 × 3) and none moved it, nor did writing the line
+in the user's language (which fixed `web_search` reply language):
 
 | variant | weather | shopping_list | reminder | population | others | stale_place |
 |---|---|---|---|---|---|---|
@@ -612,10 +613,13 @@ measured (qwen3-vl-8b, varied filler, N=4/8/16 × 3) and none moved it:
 | `topic` slot from `general_answer`/`web_search` | 6 | 0 | 6 | 3 | 15/36 | 3/9 |
 | reworded focus line ("only if the last turn names no other target") | 9 | 2 | 3 | 3 | 17/36 | 3/9 |
 | both | 6 | 3 | 3 | 3 | 15/36 | 3/9 |
+| focus line in Russian (the turn's language) | 9 | 0 | 6 | 3 | 18/36 | 3/9 |
+| Russian line + "only if the previous reply named no other place" + one example | 9 | 1 | 6 | 3 | 19/36 | 3/9 |
 
 The topic slot mostly holds a filler question, and at N=16 it displaced the place ("там" was
-passed literally as the location).  The English rule in the reworded line was ignored.  Probe
-variants `topic`, `reword`, `topic_reword` in `scripts/context_probe.py`.
+passed literally as the location).  The English rule in the reworded line was ignored.  At N=4/8 the model still
+answers "В Мюнхене" whatever the line says, so the slot itself, not the wording, wins.  Probe
+variants `topic`, `reword`, `topic_reword`, `ru_line`, `ru_reword` in `scripts/context_probe.py`.
 
 ### `web_search` reply language
 
