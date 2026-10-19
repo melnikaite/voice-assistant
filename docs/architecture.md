@@ -599,17 +599,18 @@ case was passing by accident.
 Still open: focus expires after `FOCUS_TTL_TURNS`, so at N=16 subjects survive only via the
 summary and are mostly lost.
 
-### TODO: `web_search` replies leak the source language
+### `web_search` reply language
 
-Asked in Russian, the assistant answered in German and in English on two separate
-`web_search` turns — the reply carries the language of the fetched sources instead of the
-user's, against `SYSTEM_PROMPT`'s "Reply in the user's language" and against the i18n contract
-in house rule 2.  Everything else (`general_answer`, tool confirmations, weather) honours the
-language correctly, so this is specific to how `web_search` folds fetched text into its answer
-(`web_search.py`, which also streams sentence-by-sentence into TTS).
+The summariser takes its reply language from `cx.user_lang`, not from the question.  The
+`query` it sees is written by the agent LLM, often in English or in the locale language
+even when the user spoke Russian, and "reply in the language of the question" then
+followed the query.  The user message ends with `search.reply_language` from the locale
+catalog ("Ответь по-русски…"), written in the reply language itself: an English rule loses
+to a few KB of foreign source text.  No extra LLM call.
 
-Worth fixing at the summarisation prompt inside the tool rather than in `SYSTEM_PROMPT` —
-the outer instruction is already there and loses to the source material.
+`scripts/web_search_lang_probe.py` checks it against hand-written results without
+DuckDuckGo: 18 cases, ru/de/en questions over foreign-language pages, including the
+query-in-another-language ones that leaked every time before the fix.
 
 ## 14. Structured datasets
 

@@ -97,6 +97,7 @@
     "search.summary_failed": "Got results but couldn't summarise them.",
     "search.summary_max_tokens": "Hit the token limit while summarising.",
     "search.summary_empty": "Couldn't summarise the results.",
+    "search.reply_language": "Answer in English, even if the results are in another language.",
     "reminders.no_client": "I can't set a reminder — no stable session id. Reload the page and try again.",
     "reminders.bad_time": "I didn't understand the time — say it more precisely, e.g. 'at 3:30 PM'.",
     "reminders.past_time": "That time is already past! Pick a future time.",

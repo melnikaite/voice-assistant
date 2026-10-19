@@ -97,6 +97,7 @@
     "search.summary_failed": "Ergebnisse erhalten, konnte sie aber nicht zusammenfassen.",
     "search.summary_max_tokens": "Tokenlimit beim Zusammenfassen erreicht.",
     "search.summary_empty": "Konnte die Ergebnisse nicht zusammenfassen.",
+    "search.reply_language": "Antworte auf Deutsch, auch wenn die Ergebnisse in einer anderen Sprache sind.",
     "reminders.no_client": "Kann keine Erinnerung setzen — keine stabile Session-ID. Seite neu laden und nochmal versuchen.",
     "reminders.bad_time": "Habe die Zeit nicht verstanden — sag's genauer, z.B. «um 15:30».",
     "reminders.past_time": "Diese Zeit liegt schon in der Vergangenheit! Wähle eine zukünftige Zeit.",
