@@ -597,7 +597,25 @@ from `general_answer` have no slot, and at N=8 the filler's last place is Ottawa
 case was passing by accident.
 
 Still open: focus expires after `FOCUS_TTL_TURNS`, so at N=16 subjects survive only via the
-summary and are mostly lost.
+summary and are mostly lost.  Raising the TTL to 20 was measured and rejected: shopping_list
+gained at N=16 (0→3/3) but the `stale_place` case lost N=16 (3→0/3), so the TTL stays 10.
+
+Still open: a stale slot hijacks a pronoun whose referent is the previous turn.  The
+`stale_place` probe case (weather for Munich, fillers, then a `general_answer` turn about
+Lisbon, then "А какая там погода?") passes only at N=16, where the Munich slot has expired;
+at N=4/8 weather is called for Munich or answered in free text (0/6).  Three fixes were
+measured (qwen3-vl-8b, varied filler, N=4/8/16 × 3) and none moved it:
+
+| variant | weather | shopping_list | reminder | population | others | stale_place |
+|---|---|---|---|---|---|---|
+| phase2 (shipped) | 9 | 3 | 6 | 3 | 21/36 | 3/9 |
+| `topic` slot from `general_answer`/`web_search` | 6 | 0 | 6 | 3 | 15/36 | 3/9 |
+| reworded focus line ("only if the last turn names no other target") | 9 | 2 | 3 | 3 | 17/36 | 3/9 |
+| both | 6 | 3 | 3 | 3 | 15/36 | 3/9 |
+
+The topic slot mostly holds a filler question, and at N=16 it displaced the place ("там" was
+passed literally as the location).  The English rule in the reworded line was ignored.  Probe
+variants `topic`, `reword`, `topic_reword` in `scripts/context_probe.py`.
 
 ### `web_search` reply language
 

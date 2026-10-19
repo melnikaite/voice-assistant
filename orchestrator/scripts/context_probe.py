@@ -88,6 +88,7 @@ class Case:
     subject: Turn                # the turn establishing the subject
     followup: str                # referential question
     check: Callable[[list[ToolInvocation], str], bool]
+    last: Turn | None = None     # a turn right before the follow-up (negative cases)
 
 
 def _args_text(inv: ToolInvocation) -> str:
@@ -161,6 +162,15 @@ CASES = [
          "А сколько там живёт людей?",
          _called(("web_search", "general_answer"), "лиссабон", "lisbon", "lisboa",
                  reply_ok=True)),
+    # Negative: an old weather slot (Munich) must not hijack "там" after the
+    # user moved to a slot-less subject (Lisbon via general_answer).
+    Case("stale_place",
+         Turn("Какая погода в Мюнхене?", "В Мюнхене +12, облачно.",
+              [("weather", {"location": "Мюнхен"}, "В Мюнхене +12, облачно.")]),
+         "А какая там погода?",
+         _called("weather", "лиссабон", "lisbon", "lisboa"),
+         last=Turn("Расскажи коротко про Лиссабон.", _LIS,
+                   [("general_answer", {"question": "Расскажи коротко про Лиссабон"}, _LIS)])),
 ]
 
 
@@ -197,7 +207,7 @@ VARIED = [
 def build_turns(case: Case, n: int, fill: str) -> list[Turn]:
     return [case.subject] + [
         IDENTICAL if fill == "identical" else VARIED[i % len(VARIED)] for i in range(n)
-    ]
+    ] + ([case.last] if case.last else [])
 
 
 # ── Renderers: turns → OpenAI messages ───────────────────────────────────
@@ -402,6 +412,50 @@ async def v_phase2(turns, q):
     return conv.messages(), (f"{focus}\n{q}" if focus else q), fold_ms, conv.summary
 
 
+def _ttl(ttl: int) -> Variant:
+    """phase2 with a different FOCUS_TTL_TURNS."""
+    async def f(turns, q):
+        from app import conversation
+        old, conversation.FOCUS_TTL_TURNS = conversation.FOCUS_TTL_TURNS, ttl
+        try:
+            return await v_phase2(turns, q)
+        finally:
+            conversation.FOCUS_TTL_TURNS = old
+    return f
+
+
+_TOPIC = {"general_answer": {"question": "topic"}, "web_search": {"query": "topic"}}
+_OLD_HEAD = ("[Conversation focus — if the message says 'there/it/this/туда/там/"
+             "об этом' or names no target, put these values into the tool "
+             "arguments instead of the pronoun: ")
+_NEW_HEAD = ("[Conversation focus — 'there/it/this/туда/там/об этом' refers to the "
+             "most recent subject. Use a value below only if the last turn names no "
+             "other target; fewer turns ago wins: ")
+
+
+def _alt(topic: bool, reword: bool) -> Variant:
+    """phase2 with a topic slot for general_answer/web_search and/or a reworded focus line."""
+    async def f(turns, q):
+        from app import conversation
+        from app.tools import TOOL_REGISTRY
+        saved = {k: TOOL_REGISTRY[k].get("focus") for k in _TOPIC}
+        orig = conversation.Conversation.focus_block
+        if topic:
+            for k, m in _TOPIC.items():
+                TOOL_REGISTRY[k]["focus"] = m
+        if reword:
+            def fb(self, fallback=None):
+                return orig(self, fallback).replace(_OLD_HEAD, _NEW_HEAD)
+            conversation.Conversation.focus_block = fb
+        try:
+            return await v_phase2(turns, q)
+        finally:
+            conversation.Conversation.focus_block = orig
+            for k, m in saved.items():
+                TOOL_REGISTRY[k]["focus"] = m
+    return f
+
+
 def _capped(v: Variant, max_turns: int = 10) -> Variant:
     """Apply production's MAX_HISTORY_TURNS window before the variant runs."""
     async def f(turns, q):
@@ -424,6 +478,10 @@ VARIANTS: dict[str, Variant] = {
     "rewrite": v_rewrite,
     "rewrite_focus": v_rewrite_focus,
     "phase2": v_phase2,
+    "phase2_ttl20": _ttl(20),
+    "topic": _alt(True, False),
+    "reword": _alt(False, True),
+    "topic_reword": _alt(True, True),
 }
 
 
