@@ -289,6 +289,8 @@ def _format_tool_message(inv: ToolInvocation) -> str:
     Gemma doesn't always pick that up just from an empty content string.
     """
     if inv.data and inv.data.get("unknown"):
+        if inv.data.get("hint"):
+            return inv.data["hint"]
         return (
             f"Tool `{inv.name}` was NOT confident in its answer. "
             f"You should call a different tool (most likely `web_search` "

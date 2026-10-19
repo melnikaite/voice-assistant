@@ -53,6 +53,7 @@
     "tools.bad_args": "I didn't understand the command parameters.",
     "tools.crashed": "Something went wrong running that.",
     "memory.empty_arg": "Tell me what you'd like me to remember.",
+    "memory.not_asked": "I only remember things when you ask me to.",
     "memory.overwritten": "Memory updated.",
     "memory.unknown_action": "I don't know that memory action.",
     "memory.no_profile": "I don't know who to remember this for — please enrol first.",

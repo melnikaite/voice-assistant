@@ -53,6 +53,7 @@
     "tools.bad_args": "Ich habe die Befehlsparameter nicht verstanden.",
     "tools.crashed": "Beim Ausführen ist ein Fehler aufgetreten.",
     "memory.empty_arg": "Sag mir, was ich mir merken soll.",
+    "memory.not_asked": "Ich merke mir nur etwas, wenn du mich darum bittest.",
     "memory.overwritten": "Speicher aktualisiert.",
     "memory.unknown_action": "Diese Speicheraktion kenne ich nicht.",
     "memory.no_profile": "Ich weiß nicht, für wen ich das merken soll — bitte zuerst einlernen.",

@@ -15,6 +15,7 @@ and goes through passphrase gating.
 from __future__ import annotations
 
 import logging
+import re
 
 from ..i18n import t
 from ..user_files import append_memory, read_memory, write_memory
@@ -55,6 +56,28 @@ async def read_memory_tool(*, ctx) -> ToolResult:
         text=t("memory.read_header", lang, content=body),
         data={"content": body},
     )
+
+
+# The model sometimes "remembers" a guess when the user only asked a question
+# ("what would Zhenya say if…" → "Zhenya doesn't like bars"), so a write needs
+# the user to have asked for one.
+_REMEMBER_CUE = re.compile(
+    r"запомн|запиш|не забудь|заметк|учти|remember|forget|make a note|note (that|down)|"
+    r"keep in mind|write (it )?down|\bmerk|vergiss nicht|notier|aufschreib|schreib (dir|es) auf",
+    re.IGNORECASE,
+)
+_FORGET_CUE = re.compile(
+    r"забуд|удали|сотри|очисти|forget|erase|delete|clear|wipe|vergiss|lösch|losch",
+    re.IGNORECASE,
+)
+
+
+def _asked(action: str, transcript: str) -> bool:
+    """No transcript (a confirmed pending action, tests) means nothing to check."""
+    if not transcript:
+        return True
+    cue = _REMEMBER_CUE if action == "append" else _FORGET_CUE
+    return bool(cue.search(transcript))
 
 
 @tool(
@@ -98,6 +121,17 @@ async def remember(*, ctx, action: str, content: str) -> ToolResult:
     profile_id = cx.profile_id
     if profile_id is None:
         return ToolResult(text=t("memory.no_profile", cx.user_lang), data={"error": "no_profile"})
+    if action in ("append", "replace") and not _asked(action, cx.transcript):
+        log.info("remember: %s refused, the user did not ask for it", action)
+        return ToolResult(
+            text=t("memory.not_asked", cx.user_lang),
+            data={
+                "error": "not_asked", "unknown": True,
+                "hint": "The user did not ask to remember or forget anything, so nothing "
+                        "was saved. Answer their message with the right tool instead "
+                        "(usually `general_answer`).",
+            },
+        )
 
     if action == "append":
         if not content or not content.strip():

@@ -139,7 +139,7 @@ service's list at call time (cache it briefly per profile).
 
 ### `terminal=False` — chaining
 
-`general_answer.py` is the canonical example (`tools/general_answer.py:80-100`). When the LLM signals it doesn't know, the tool returns `data={"unknown": True}` and the agent loop chains into `web_search`. Decision lives in `app/agent.py::_execute_one`. Most tools should stay `terminal=True`.
+`general_answer.py` is the canonical example (`tools/general_answer.py:80-100`). When the LLM signals it doesn't know, the tool returns `data={"unknown": True}` and the agent loop chains into `web_search`. Decision lives in `app/agent.py::_execute_one`. Add `data["hint"]` to tell the model what to do instead of the default "retry with `web_search`" (`remember` uses it when the user never asked to remember anything). Most tools should stay `terminal=True`.
 
 ### `risk` — three levels
 
