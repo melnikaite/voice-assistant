@@ -132,6 +132,8 @@ const PROGRESS_LABEL_KEYS = {
   create_reminder:  'progress.create_reminder',
   cancel_reminder:  'progress.cancel_reminder',
   list_reminders:   'progress.list_reminders',
+  // how_would_answer / wwyd_remember
+  wwyd:             'progress.wwyd',
 };
 
 // ---------------------------------------------------------------------------
@@ -2644,6 +2646,7 @@ async function loadSettings() {
     // i18n.js: syncFromSettings handles the de/ru/en cases.
     syncFromSettings(s.language);
     loadTelegram();
+    loadWwyd();
   } catch (e) {
     settingsStatusEl.textContent = i18n('settings.error', { err: e.message });
   }
@@ -2746,6 +2749,130 @@ async function unlinkTelegram() {
 
 telegramLinkBtn?.addEventListener('click', createTelegramLink);
 telegramUnlinkBtn?.addEventListener('click', unlinkTelegram);
+
+// ── wwyd connection (inside Settings) ───────────────────────────────────
+// OAuth runs server-side (DCR + PKCE); the browser only follows the
+// authorize URL and comes back to /?wwyd=<result>.  Tokens never reach JS.
+
+const wwydStatusEl     = document.querySelector('#wwyd-status');
+const wwydConnectBox   = document.querySelector('#wwyd-connect-box');
+const wwydConnectedBox = document.querySelector('#wwyd-connected-box');
+const wwydUrlEl        = document.querySelector('#wwyd-url');
+const wwydKeyEl        = document.querySelector('#wwyd-key');
+const wwydOpenLink     = document.querySelector('#wwyd-open-link');
+const wwydMenuLink     = document.querySelector('#wwyd-menu-link');
+const wwydMapEl        = document.querySelector('#wwyd-audience-map');
+
+async function loadWwyd() {
+  if (!_currentProfile || !wwydStatusEl) return;
+  try {
+    const r = await fetch('/api/wwyd', { credentials: 'same-origin' });
+    if (!r.ok) return;
+    const data = await r.json();
+    const conn = data.connection;
+    wwydConnectBox.style.display = conn ? 'none' : '';
+    wwydConnectedBox.style.display = conn ? '' : 'none';
+    wwydMenuLink.style.display = conn ? '' : 'none';
+    if (!conn) {
+      wwydStatusEl.textContent = i18n('wwyd.not_connected');
+      return;
+    }
+    wwydStatusEl.textContent = data.error
+      ? i18n('wwyd.unreachable')
+      : i18n('wwyd.connected', { url: conn.url });
+    wwydOpenLink.href = conn.url;
+    wwydMenuLink.href = conn.url;
+    wwydMapEl.replaceChildren();
+    for (const asker of data.askers || []) {
+      const label = document.createElement('label');
+      label.textContent = asker.name || i18n('wwyd.guests');
+      const sel = document.createElement('select');
+      sel.dataset.asker = asker.key;
+      const def = document.createElement('option');
+      def.value = '';
+      def.textContent = i18n('wwyd.default_audience');
+      sel.append(def);
+      for (const a of data.audiences || []) {
+        const o = document.createElement('option');
+        o.value = a.name;
+        o.textContent = a.description ? `${a.name} — ${a.description}` : a.name;
+        sel.append(o);
+      }
+      sel.value = conn.audience_map?.[asker.key] || '';
+      label.append(sel);
+      wwydMapEl.append(label);
+    }
+  } catch (e) {
+    log(`wwyd: status failed: ${e.message}`);
+  }
+}
+
+async function _wwydPost(url, body, method = 'POST') {
+  const r = await fetch(url, {
+    method, credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+  return data;
+}
+
+async function connectWwyd() {
+  try {
+    const data = await _wwydPost('/api/wwyd/connect', { url: wwydUrlEl.value });
+    wwydStatusEl.textContent = i18n('wwyd.redirecting');
+    window.location.assign(data.authorize_url);
+  } catch (e) {
+    wwydStatusEl.textContent = i18n('wwyd.failed', { err: e.message });
+  }
+}
+
+async function saveWwydKey() {
+  try {
+    await _wwydPost('/api/wwyd/api-key', { url: wwydUrlEl.value, key: wwydKeyEl.value });
+    wwydKeyEl.value = '';
+    loadWwyd();
+  } catch (e) {
+    wwydStatusEl.textContent = i18n('wwyd.failed', { err: e.message });
+  }
+}
+
+async function saveWwydMap() {
+  const map = {};
+  for (const sel of wwydMapEl.querySelectorAll('select')) {
+    if (sel.value) map[sel.dataset.asker] = sel.value;
+  }
+  try {
+    await _wwydPost('/api/wwyd/audiences', { audience_map: map }, 'PUT');
+    wwydStatusEl.textContent = i18n('settings.saved');
+  } catch (e) {
+    wwydStatusEl.textContent = i18n('settings.error', { err: e.message });
+  }
+}
+
+async function disconnectWwyd() {
+  await fetch('/api/wwyd', { method: 'DELETE', credentials: 'same-origin' });
+  loadWwyd();
+}
+
+document.querySelector('#wwyd-connect-btn')?.addEventListener('click', connectWwyd);
+document.querySelector('#wwyd-key-btn')?.addEventListener('click', saveWwydKey);
+document.querySelector('#wwyd-map-save')?.addEventListener('click', saveWwydMap);
+document.querySelector('#wwyd-disconnect-btn')?.addEventListener('click', disconnectWwyd);
+
+// Back from the OAuth round trip: open Settings, show the result, clean the URL.
+{
+  const result = new URLSearchParams(window.location.search).get('wwyd');
+  if (result) {
+    const panel = document.querySelector('#settings-panel');
+    if (panel) panel.open = true;
+    if (result !== 'connected' && wwydStatusEl) {
+      wwydStatusEl.textContent = i18n('wwyd.failed', { err: result });
+    }
+    history.replaceState(null, '', window.location.pathname);
+  }
+}
 
 // ── Connected devices (Wave 2 Phase 4 agents panel) ────────────────────
 //

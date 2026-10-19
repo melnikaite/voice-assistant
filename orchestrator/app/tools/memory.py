@@ -67,7 +67,10 @@ async def read_memory_tool(*, ctx) -> ToolResult:
         "bulleted entry (most common case).\n"
         "  • action='replace' + content=<full markdown> — overwrite the "
         "whole memory file.  Use rarely; for 'forget everything I told "
-        "you' pass an empty string."
+        "you' pass an empty string.\n"
+        "How the speaker answers people, decides or behaves (style, "
+        "habits, rules, boundaries) goes to `wwyd_remember` when that "
+        "tool is listed."
     ),
     params_schema={
         "type": "object",

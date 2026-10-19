@@ -242,7 +242,16 @@
     "datasets.forecast_not_enough": "Для прогноза мало данных: в «{dataset}» {have} мес., нужно хотя бы {need}.",
     "datasets.forecast": "Прогноз {field}{scope} по {periods} мес.: {body}.",
     "datasets.extended": "Добавил в «{dataset}» поля: {fields}.",
-    "datasets.deleted": "Набор «{dataset}» удалён."
+    "datasets.deleted": "Набор «{dataset}» удалён.",
+    "tool.service_not_connected": "Для этого нужен wwyd, а он не подключён к этому профилю — подключи его в настройках.",
+    "wwyd.unknown_person": "Не знаю, как ответил бы {name}: у него не подключён wwyd.",
+    "wwyd.which_person": "Чей ответ предсказать?",
+    "wwyd.needs_unmet": "Не могу сказать, как ответил бы {name}, без этого: {needs}.",
+    "wwyd.ask_directly": "Тут уверенно не предскажу — лучше спросить {name} напрямую.",
+    "wwyd.unavailable": "wwyd сейчас недоступен.",
+    "wwyd.remembered": "Сохранил в wwyd: {text}",
+    "wwyd.remember_absorbed": "wwyd это уже знал — я подкрепил существующую запись.",
+    "wwyd.remember_dropped": "wwyd это не принял ({reason})."
   },
   "currencies": {
     "names": {

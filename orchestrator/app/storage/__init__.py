@@ -147,6 +147,17 @@ from .telegram_links import (
     get_telegram_link_for_profile,
     list_telegram_links,
 )
+from .wwyd import (
+    connection_public,
+    delete_wwyd_connection,
+    get_wwyd_connection,
+    list_wwyd_connected_profiles,
+    pop_wwyd_pending,
+    put_wwyd_pending,
+    save_wwyd_connection,
+    set_wwyd_audience_map,
+    update_wwyd_tokens,
+)
 
 __all__ = [
     # schema
@@ -271,4 +282,14 @@ __all__ = [
     "delete_telegram_link_for_profile",
     "get_missed_reminders_for_profile",
     "get_reminder_profile_id",
+    # wwyd connections
+    "connection_public",
+    "delete_wwyd_connection",
+    "get_wwyd_connection",
+    "list_wwyd_connected_profiles",
+    "pop_wwyd_pending",
+    "put_wwyd_pending",
+    "save_wwyd_connection",
+    "set_wwyd_audience_map",
+    "update_wwyd_tokens",
 ]

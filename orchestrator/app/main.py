@@ -33,6 +33,7 @@ from .routes import (
     telegram as telegram_routes,
     voicemail as voicemail_routes,
     voices as voices_routes,
+    wwyd as wwyd_routes,
 )
 from .storage import (
     PRICING,
@@ -231,6 +232,7 @@ app.include_router(items_routes.router)
 app.include_router(step_up_routes.router)
 app.include_router(stream_routes.router)
 app.include_router(telegram_routes.router)
+app.include_router(wwyd_routes.router)
 
 
 async def _probe(client: httpx.AsyncClient, url: str, expected_model: str) -> dict:

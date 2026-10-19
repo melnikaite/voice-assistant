@@ -113,6 +113,8 @@ Run with `pytest orchestrator/tests/test_dice.py`. The `_fresh_db` fixture in `c
 | `risk`         | str    | `"read"`| `"read"` / `"low_write"` / `"high_write"`. Gates execution behind the passphrase. |
 | `focus`        | dict   | `None`  | Argument → conversation-focus slot, e.g. `{"location": "location"}`, so a later "there" / "туда" resolves to it. See `app/conversation.py`. |
 | `summary`      | callable | `None` | `(args) -> str` readback used when a `high_write` call is deferred to `pending_actions`; the default joins short `k=v` pairs and drops structured arguments. |
+| `tier`         | str    | `"system"` | `"device"` needs a matching desktop-agent (`device_kind=`); `"api"` needs a per-profile service connection — see below. |
+| `requires_token` | tuple | `()` | For `tier="api"`: service names that must all be in `AgentContext.services` for the tool to be listed and run (e.g. `("wwyd",)`). |
 
 ### `description` — write for the LLM
 
@@ -122,6 +124,15 @@ This single field determines whether your tool gets picked. Patterns that work:
 - Negative triggers — when NOT to use it (`do NOT use for shuffling`).
 - 2-3 few-shot args inline. See `calculator.py:382-391`, `set_reminder.py:108-122`.
 - Cross-reference sibling tools by name when there's overlap (`read_settings.description` ends with "for «о чём мы говорили» use `my_history`" — `settings.py:53-56`).
+
+### `tier="api"` — tools that need a connected service
+
+A tool that talks to a per-profile external service (today: wwyd) declares
+`tier="api", requires_token=("<service>",)`.  The pipeline fills
+`AgentContext.services` for the turn (`tools/wwyd.py::wwyd_services`); tools
+whose services are missing are left out of the schema the LLM sees and refused
+at dispatch with `tool.service_not_connected`.  Add your service to the
+pipeline's `services=` when you introduce a new one.
 
 ### `terminal=False` — chaining
 

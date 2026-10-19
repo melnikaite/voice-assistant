@@ -71,6 +71,7 @@ Do NOT `c.close()` a connection borrowed from `_conn()`. It's thread-local; clos
 | Per-user memory.md / settings.json? | [`app/user_files.py`](app/user_files.py) — flat files under `$DATA_DIR_CONTAINER/users/<profile_id>/` |
 | Web Push? | [`app/push.py`](app/push.py) + [`app/storage/push_subscriptions.py`](app/storage/push_subscriptions.py) |
 | Voicemail rows + audio? | [`app/storage/voice_messages.py`](app/storage/voice_messages.py) — row + WAV under `$DATA_DIR_CONTAINER/voice_messages/` |
+| wwyd persona (connect, predict, capture)? | [`app/wwyd.py`](app/wwyd.py) + [`app/tools/wwyd.py`](app/tools/wwyd.py) + [`app/wwyd_capture.py`](app/wwyd_capture.py) — [`docs/architecture.md`](../docs/architecture.md) §15 |
 | Live voicemail push to recipient's tab? | [`app/ws.py::notify_voicemail_arrived`](app/ws.py) + `_SESSIONS_BY_PROFILE` registry |
 
 ## Gotchas

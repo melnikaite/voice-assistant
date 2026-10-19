@@ -514,6 +514,38 @@ def init_schema() -> None:
                 CREATE INDEX IF NOT EXISTS idx_telegram_link_tokens_expires
                     ON telegram_link_tokens(expires_at);
 
+                -- wwyd persona server, one connection per profile.
+                -- Tokens are bearer secrets: never logged, never
+                -- returned by the API (see storage/wwyd.py).
+                CREATE TABLE IF NOT EXISTS wwyd_connections (
+                    profile_id          INTEGER PRIMARY KEY REFERENCES speaker_profiles(id) ON DELETE CASCADE,
+                    base_url            TEXT    NOT NULL,
+                    resource            TEXT    NOT NULL,
+                    auth_kind           TEXT    NOT NULL,
+                    client_id           TEXT,
+                    access_token        TEXT    NOT NULL,
+                    refresh_token       TEXT,
+                    expires_at          REAL,
+                    token_endpoint      TEXT,
+                    revocation_endpoint TEXT,
+                    audience_map        TEXT    NOT NULL DEFAULT '{}',
+                    connected_at        REAL    NOT NULL
+                );
+
+                -- In-flight OAuth authorizations (state -> PKCE verifier), 10-min TTL.
+                CREATE TABLE IF NOT EXISTS wwyd_oauth_pending (
+                    state               TEXT    PRIMARY KEY,
+                    profile_id          INTEGER NOT NULL,
+                    base_url            TEXT    NOT NULL,
+                    resource            TEXT    NOT NULL,
+                    client_id           TEXT    NOT NULL,
+                    code_verifier       TEXT    NOT NULL,
+                    redirect_uri        TEXT    NOT NULL,
+                    token_endpoint      TEXT    NOT NULL,
+                    revocation_endpoint TEXT,
+                    expires_at          REAL    NOT NULL
+                );
+
                 -- Housekeeping: drop dead / superseded indexes.
                 --   idx_items_owner_deleted    — replaced by the 3-col
                 --     idx_items_owner_deleted_created above.

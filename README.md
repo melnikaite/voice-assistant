@@ -49,6 +49,13 @@ most tasks.
   month, service, amount" creates a JSON-schema dataset inside a
   folder; entries are validated, the bot asks for missing fields, and
   totals, breakdowns and forecasts are computed by code, not the model.
+- 🪞 **wwyd persona (optional)** — connect a self-hosted
+  [wwyd](https://github.com/melnikaite/wwyd) server per profile in
+  Settings (OAuth or API key).  The assistant then predicts how you
+  would answer ("what would Eugene say if…"), saves "remember that I
+  answer clients like…" as approved claims, and sends your own
+  dictated words to wwyd for review as pending claims.  See
+  [`docs/architecture.md`](docs/architecture.md) §15.
 - 📬 **Household voicemail** — leave voice messages for another
   household member; speaker-ID routes them, and the recipient gets a
   Web Push with one-tap playback / reply.
@@ -237,6 +244,10 @@ Every default points at localhost:
   tools degrade to a graceful "offline" answer when the network is
   out.  Everything else (LLM turns, memory, reminders, computer
   control, voice messages) works without internet.
+
+The optional wwyd connection (§15 of the architecture doc) is the one
+place where your words leave the orchestrator: to the wwyd server you
+point it at, and only for the profile that connected it.
 
 No telemetry, no cloud accounts, no LLM API keys.  The only secrets
 are local: `data/vapid_private.pem` (Web Push, auto-generated) and

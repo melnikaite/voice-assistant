@@ -79,6 +79,7 @@
           <div class="grid" style="grid-template-columns: 1fr auto auto">
             <p style="margin:0">
               <span data-i18n="auth.signed_in_as">Signed in as</span> <strong id="auth-current-name">—</strong>
+              <a id="wwyd-menu-link" href="#" target="_blank" rel="noopener noreferrer" style="display:none" data-i18n="wwyd.open">Open wwyd</a>
               <small style="color:var(--pico-muted-color)">
                 · <span data-i18n="auth.valid_until">valid until</span> <span id="auth-current-expires">—</span>
               </small>
@@ -466,6 +467,35 @@
             <div class="grid" style="grid-template-columns: auto auto 1fr">
               <button id="telegram-link-btn" type="button" data-i18n="telegram.link">Link Telegram</button>
               <button id="telegram-unlink-btn" class="outline secondary" type="button" style="display:none" data-i18n="telegram.unlink">Unlink</button>
+            </div>
+          </section>
+          <!-- wwyd persona server: per-profile OAuth or API key (see routes/wwyd.py).
+               Opened directly in a new tab, never embedded. -->
+          <section id="wwyd-section" style="margin-top:1rem">
+            <h6 data-i18n="wwyd.title">wwyd — how you answer</h6>
+            <p><small id="wwyd-status" style="color:var(--pico-muted-color)"></small></p>
+            <div id="wwyd-connect-box">
+              <input id="wwyd-url" type="url" placeholder="https://wwyd.example.org" data-i18n-placeholder="wwyd.url_placeholder" />
+              <div class="grid" style="grid-template-columns: auto 1fr">
+                <button id="wwyd-connect-btn" type="button" data-i18n="wwyd.connect">Connect</button>
+                <span></span>
+              </div>
+              <details>
+                <summary data-i18n="wwyd.api_key_summary">Use an API key instead</summary>
+                <div class="grid" style="grid-template-columns: 1fr auto">
+                  <input id="wwyd-key" type="password" autocomplete="off" placeholder="wwyd_…" />
+                  <button id="wwyd-key-btn" type="button" class="outline" data-i18n="wwyd.save_key">Save key</button>
+                </div>
+              </details>
+            </div>
+            <div id="wwyd-connected-box" style="display:none">
+              <p><a id="wwyd-open-link" href="#" target="_blank" rel="noopener noreferrer" data-i18n="wwyd.open">Open wwyd</a></p>
+              <small data-i18n="wwyd.audiences_hint">When someone asks how you would answer, they are answered as this audience:</small>
+              <div id="wwyd-audience-map"></div>
+              <div class="grid" style="grid-template-columns: auto auto 1fr">
+                <button id="wwyd-map-save" type="button" class="outline" data-i18n="settings.save">Save</button>
+                <button id="wwyd-disconnect-btn" class="outline secondary" type="button" data-i18n="wwyd.disconnect">Disconnect</button>
+              </div>
             </div>
           </section>
         </article>

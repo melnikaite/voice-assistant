@@ -669,6 +669,72 @@ per-entry delete for profiles with write access.
 **Measured** with `orchestrator/scripts/datasets_probe.py` against qwen3-vl-8b on LocalAI
 (create, add, missing→ask→answer, stats, forecast with too little data, new field, no share).
 
+## 15. wwyd persona
+
+[wwyd](https://github.com/melnikaite/wwyd) is a separate self-hosted MCP server that holds
+one person's style, habits and decision rules as small *claims* and answers "how would the
+owner reply here?" (`predict`).  The assistant is a client of it.  Code: `app/wwyd.py`
+(OAuth + MCP client, the only place that sees tokens), `app/storage/wwyd.py`,
+`app/routes/wwyd.py`, `app/tools/wwyd.py`, `app/wwyd_capture.py`.
+
+**Connection — per profile.**  Settings takes the wwyd URL and runs OAuth 2.1 as a public
+client on the server side: protected-resource + authorization-server discovery, dynamic
+client registration, PKCE S256, scope `owner`, RFC 8707 `resource` = `<url>/mcp`.  The
+callback (`/api/wwyd/callback`) requires the same cookie profile that started the flow and a
+single-use `state` (10-min TTL).  Access tokens (1 h) are refreshed before expiry and once on
+a 401; wwyd rotates the refresh token on every use.  An owner-scope API key can be pasted
+instead.  Tokens live in `wwyd_connections` like the other local secrets (plaintext in the
+local DB), are never returned by the API and never logged.  Disconnect revokes the grant at
+wwyd (`/revoke`; API keys are revoked on wwyd's account page) and deletes the row.
+Plain `http://` is accepted for loopback only.  wwyd itself is only linked ("Open wwyd"),
+never embedded.
+
+**Transport.**  Minimal MCP over Streamable HTTP with `httpx` (initialize →
+`notifications/initialized` → one `tools/call` → session DELETE; JSON or SSE replies) rather
+than the MCP SDK, to avoid a dependency for four tools.
+
+**Who is who.**  wwyd has no contact identities, only owner-defined *audiences* (slugs with a
+description).  The mapping lives here: `wwyd_connections.audience_map` maps
+`profile:<id>` (another household member, by voice or their linked Telegram) and `guest`
+(unrecognised voice) to an audience; unmapped askers get wwyd's default audience.  Names
+never go to wwyd.
+
+**Tool visibility.**  Both tools are `tier="api"`; the pipeline sets
+`AgentContext.services` per turn (`tools/wwyd.py::wwyd_services`):
+
+| Service | Granted when | Tool |
+|---|---|---|
+| `wwyd` | one identified speaker (voice match, typed turn or Telegram link — not a cookie under an unmatched voice), not mixed, with wwyd connected | `wwyd_remember` |
+| `wwyd_ask` | anyone on the server has wwyd connected; never on mixed turns | `how_would_answer` |
+
+**Read path — `how_would_answer`.**  Target = the named person, else the speaker, else the
+only connected profile.  The owner asking about themself names the audience and gets
+`include_private`; anyone else is answered as their mapped audience (the model's `audience`
+argument is ignored) and always hears wwyd's `disclosure` first.  On `needs`, only calendar
+free/busy is looked up — a fixed read-only AppleScript on the target's own paired Mac
+returning start/end times for 7 days, never titles, attendees or places — and every other
+need is passed back as "not available", so wwyd answers without it.  Whether to auto-reply or
+draft stays with the assistant; this tool only speaks the prediction.
+
+**Write path, explicit — `wwyd_remember`** (`low_write`): one third-person statement with
+kind and a seeded category → `add_claims` with `status: approved` (the owner said it).
+
+**Write path, automatic — `wwyd_capture`.**  After the reply has been sent (the pipeline's
+`finally`), the turn is queued for the identified owner only; a cheap first-person/"tell X"
+regex skips most turns, and an in-memory per-profile drain — the conversation summary
+fold's pattern — asks the LLM which parts are the owner's own words: dictated messages
+(`message`, `from_owner`, audience from the recipient's mapping) or statements about
+themselves (`note`).  Requests to the assistant are dropped.  Items go to `ingest_raw`; wwyd
+derives claims that land PENDING for review in wwyd.  Unstripped code-word attempts, mixed
+turns, guests and turns that already used a wwyd tool are never sent.
+
+**Measured.**  `scripts/wwyd_capture_probe.py` (15 hand-written ru/en/de utterances,
+qwen3-vl-8b on LocalAI): 14/15 with the first prompt ("Spiel meine Playlist ab" picked as a
+message), 15/15 after naming "play my playlist" among the requests.  End to end against a
+local wwyd: OAuth connect, approved claim, two pending claims derived from dictated words,
+review, predict for the owner, a mapped member and a guest (2–7 s per predict), revoke on
+disconnect.
+
 ---
 
 ## Where to look next

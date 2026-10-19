@@ -66,10 +66,9 @@ RiskLevel = Literal["read", "low_write", "high_write"]
 #             session.device_kind != tool.device_kind (the LLM never sees
 #             them and never tries to call them).  computer_use,
 #             look_at_screen, desktop fall here.
-#   "api"     Requires per-profile OAuth / API tokens.  Visible to all
-#             sessions but gated at dispatch time on token presence.
-#             (Reserved for future Gmail / Calendar / Spotify tools —
-#             none exist yet; token check scaffold goes in dispatch().)
+#   "api"     Requires a per-profile service connection named in
+#             ``requires_token``.  Listed and run only when the turn's
+#             ``AgentContext.services`` covers it (wwyd tools).
 TierLevel = Literal["system", "device", "api"]
 
 
@@ -220,10 +219,9 @@ def tool(
     desktop-agent type that must be connected and matching the session's
     ``device_kind`` field.  Example: ``device_kind="macos_agent"``.
 
-    ``requires_token`` is a list of service identifiers whose per-profile
-    OAuth / API tokens must be present before the tool can run.  Only
-    relevant for ``tier="api"`` tools; dispatch checks presence and
-    returns a friendly prompt-to-connect message when a token is missing.
+    ``requires_token`` names the services (``AgentContext.services``) a
+    ``tier="api"`` tool needs; without them the tool is hidden from the
+    LLM and refused in ``agent._execute_one``.
 
     ``locked_compat`` describes how the tool behaves when the host screen
     is locked (only meaningful for ``tier="device"`` tools):

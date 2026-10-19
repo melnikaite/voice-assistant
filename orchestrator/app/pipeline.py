@@ -29,7 +29,7 @@ from typing import Protocol
 
 import numpy as np
 
-from . import i18n, memory, speaker, vision
+from . import i18n, memory, speaker, vision, wwyd_capture
 from .agent import AgentContext, AgentResult, run_agent
 from .asr import transcribe
 from .conversation import Conversation
@@ -49,6 +49,7 @@ from .storage import (
 from .user_files import verify_passphrase
 from .storage.categories import get_last_category
 from .tools.datasets import context_block as dataset_context_block
+from .tools.wwyd import wwyd_services
 
 log = logging.getLogger(__name__)
 
@@ -303,6 +304,9 @@ class Pipeline:
         # signal to pick a language from for "too short" / failed-ASR
         # branches.  Updated once profile_id is known.
         user_lang: str | None = None
+        # Profile whose own words may feed wwyd: one voice that matched it, or a
+        # channel that identifies it without voice ID (typed turn, Telegram).
+        wwyd_owner_id: int | None = None
 
         try:
             if text is None and duration_ms < MIN_DURATION_MS:
@@ -384,6 +388,12 @@ class Pipeline:
             if speaker_name is None and profile_id is not None and not attr.is_mixed:
                 speaker_name = await get_speaker_profile_name(profile_id)
             record["speaker_name"] = speaker_name
+            # A cookie under an unmatched voice is someone else at the owner's tab.
+            if (
+                profile_id is not None and not attr.is_mixed
+                and (attr.profile_id == profile_id or spk_task is None)
+            ):
+                wwyd_owner_id = profile_id
 
             # Resolve user-facing language for THIS turn now that we
             # know the speaker.  Drives every t() call below — agent
@@ -601,6 +611,10 @@ class Pipeline:
                     session_id,
                 )
 
+            # An unstripped code-word attempt must never reach wwyd.
+            if passphrase is not None and not is_authenticated:
+                wwyd_owner_id = None
+
             # If we didn't just authenticate, inherit any in-flight auth
             # window the session is carrying from a previous turn.
             # NOT inherited on mixed turns (#59): a second voice inside
@@ -808,6 +822,7 @@ class Pipeline:
                 participants=attr.participants,
                 held=conversation.held if conversation is not None else None,
                 transcript=transcript,
+                services=await wwyd_services(wwyd_owner_id, attr.is_mixed),
             )
             focus_block = ""
             if conversation is not None:
@@ -876,6 +891,10 @@ class Pipeline:
                 await self._hooks.on_response_end()
             except Exception:
                 pass
+            if wwyd_owner_id is not None and not record.get("error"):
+                wwyd_capture.observe(
+                    wwyd_owner_id, False, record.get("transcript") or "", record.get("tool_name")
+                )
             try:
                 record_id = await save_utterance(**record)
                 # Background: compute embedding so it doesn't delay the

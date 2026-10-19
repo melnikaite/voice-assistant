@@ -242,7 +242,16 @@
     "datasets.forecast_not_enough": "Not enough data for a forecast: «{dataset}» has {have} months, I need at least {need}.",
     "datasets.forecast": "Forecast of {field}{scope} from {periods} months: {body}.",
     "datasets.extended": "Added {fields} to «{dataset}».",
-    "datasets.deleted": "Dataset «{dataset}» deleted."
+    "datasets.deleted": "Dataset «{dataset}» deleted.",
+    "tool.service_not_connected": "That needs wwyd, and it isn't connected for this profile — connect it in Settings.",
+    "wwyd.unknown_person": "I don't know how {name} would answer — they haven't connected wwyd.",
+    "wwyd.which_person": "Whose answer should I predict?",
+    "wwyd.needs_unmet": "I can't tell how {name} would answer without: {needs}.",
+    "wwyd.ask_directly": "I can't predict that confidently — better ask {name} directly.",
+    "wwyd.unavailable": "wwyd isn't available right now.",
+    "wwyd.remembered": "Saved to wwyd: {text}",
+    "wwyd.remember_absorbed": "wwyd already knew that — I strengthened the existing note.",
+    "wwyd.remember_dropped": "wwyd didn't take it ({reason})."
   },
   "currencies": {
     "names": {

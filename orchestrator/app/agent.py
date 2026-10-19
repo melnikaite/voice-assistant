@@ -111,6 +111,9 @@ class AgentContext:
     # This turn's user utterance, for tools that check the model's
     # arguments against what was actually said.  Empty on replays.
     transcript: str = ""
+    # Per-profile services this turn may use (e.g. "wwyd"); tier="api"
+    # tools whose ``requires_token`` is not covered are hidden and refused.
+    services: "frozenset[str]" = frozenset()
 
 
 @dataclass
@@ -201,7 +204,9 @@ def _build_cached_schemas() -> list[dict]:
 _TOOL_SCHEMAS_CACHED: list[dict] | None = None
 
 
-def _tool_visible_for_session(schema: dict, device_kind: str | None) -> bool:
+def _tool_visible_for_session(
+    schema: dict, device_kind: str | None, services: "frozenset[str]" = frozenset()
+) -> bool:
     """Return True if a tool schema should be advertised to the LLM for a
     given session ``device_kind``.
 
@@ -210,8 +215,8 @@ def _tool_visible_for_session(schema: dict, device_kind: str | None) -> bool:
     * tier="device"  → visible only when session.device_kind matches
                         tool.device_kind exactly.  Hidden on "web" sessions
                         and on sessions that didn't declare a device_kind.
-    * tier="api"     → always visible (token gating happens at dispatch,
-                        not at schema-advertisement time).
+    * tier="api"     → visible only when every ``requires_token`` service
+                        is in ``services`` (also re-checked at dispatch).
     """
     name = schema.get("function", {}).get("name")
     if not name:
@@ -222,11 +227,16 @@ def _tool_visible_for_session(schema: dict, device_kind: str | None) -> bool:
     tier = entry.get("tier", "system")
     if tier == "device":
         return entry.get("device_kind") == device_kind
-    # system or api — always advertise
+    if tier == "api":
+        return set(entry.get("requires_token") or ()) <= services
     return True
 
 
-def _schemas_with_clock(now_str: str, device_kind: str | None = None) -> list[dict]:
+def _schemas_with_clock(
+    now_str: str,
+    device_kind: str | None = None,
+    services: "frozenset[str]" = frozenset(),
+) -> list[dict]:
     """Return the tool catalog filtered for ``device_kind``, with ``{now}``
     stamped into the reminders entry.
 
@@ -255,7 +265,7 @@ def _schemas_with_clock(now_str: str, device_kind: str | None = None) -> list[di
             break
     # Filter device-tier tools that don't match this session's device_kind.
     # system/api tools pass through unconditionally.
-    out = [s for s in out if _tool_visible_for_session(s, device_kind)]
+    out = [s for s in out if _tool_visible_for_session(s, device_kind, services)]
     return out
 
 
@@ -314,7 +324,9 @@ async def run_agent(
     # doesn't bleed into free-form answers (general_answer must NOT know
     # the date; date queries belong to web_search like any other fresh data).
     now_str = datetime.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M%z")
-    tool_schemas = _schemas_with_clock(now_str, device_kind=ctx.device_kind)
+    tool_schemas = _schemas_with_clock(
+        now_str, device_kind=ctx.device_kind, services=ctx.services
+    )
 
     messages: list[dict] = [{"role": "system", "content": system}]
     if history:
@@ -580,6 +592,16 @@ async def _execute_one(tc: ParsedToolCall, ctx: AgentContext) -> ToolInvocation:
                     },
                     terminal=True,
                 )
+
+    # ── API-tier gate: the profile must have the service connected ────
+    if tool_tier == "api" and not set(meta.get("requires_token") or ()) <= ctx.services:
+        return ToolInvocation(
+            name=tc.name,
+            args=tc.args,
+            text=t("tool.service_not_connected", ctx.user_lang),
+            data={"error": "service_not_connected"},
+            terminal=True,
+        )
 
     # ── Step-up gating: private tools require push-to-device approval ─
     is_private = bool(meta.get("private", False)) if meta else False
