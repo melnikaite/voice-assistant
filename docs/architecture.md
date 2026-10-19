@@ -328,7 +328,7 @@ their benchmark cards.
 
 #### Usable
 
-| | **Gemma 4 E4B QAT q4_0** (fallback) | **Qwen3-VL-8B-Instruct Q4_K_M** (default) |
+| | **Gemma 4 E4B QAT q4_0** (removed 2026-10) | **Qwen3-VL-8B-Instruct Q4_K_M** (default) |
 |---|---|---|
 | Install | `local-ai models install …` (already present) | `local-ai models install qwen3-vl-8b-instruct` |
 | Backend | llama-cpp + mmproj | llama-cpp + mmproj (same one) |
@@ -345,12 +345,11 @@ their benchmark cards.
 | Turn that generates prose | **8–18 s** | 11–29 s |
 | Obeys "never free text" | no — answers chatty turns directly | **yes** |
 
-Qwen3-VL is the default — `LLM_MODEL=qwen3-vl-8b-instruct` in `.env` — for being better at
-every accuracy axis measured, decisively so on anything involving the screen.  Gemma 4 E4B is the
-fallback: `orchestrator/start.sh` uses it when `LLM_MODEL` is unset, and it is 1.5–2x faster on
-turns that generate speech with a nearly free long context.  Switching is that one line; running
-Gemma for text and Qwen for vision via `LLM_VISION_MODEL` keeps both resident (~19 GB), so prefer
-one model outright.
+Qwen3-VL is the only model, the default in `orchestrator/start.sh`, for being better at every
+accuracy axis measured, decisively so on anything involving the screen.  Gemma 4 E4B was the
+fallback until 2026-10 and was removed from LocalAI once nothing else on the host used it; it is
+1.5–2x faster on turns that generate speech with a nearly free long context, so it is the first
+thing to re-measure if latency matters more than the screen.
 
 #### Context sizing — why the two numbers differ so much
 

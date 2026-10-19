@@ -35,8 +35,8 @@ set -a
 
 # --- backends -----------------------------------------------------------
 : "${LLM_URL:=http://localhost:1240}"
-: "${LLM_MODEL:=gemma-4-e4b-it-qat-q4_0}"
-# Disables Gemma's adaptive thinking on LocalAI/llama.cpp — a voice
+: "${LLM_MODEL:=qwen3-vl-8b-instruct}"
+# Disables adaptive thinking on LocalAI/llama.cpp — a voice
 # reply cannot afford sporadic multi-second CoT (see docker-compose.yml).
 : "${LLM_REASONING_EFFORT:=none}"
 : "${LLM_MAX_TOKENS:=131072}"

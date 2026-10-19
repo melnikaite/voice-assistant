@@ -21,11 +21,9 @@ most tasks.
   faster-whisper).
 - 🧠 **Local LLM agent loop** via any OpenAI-compatible endpoint —
   default is [LocalAI](https://localai.io) (llama.cpp on Metal/CUDA)
-  running Gemma 4 E4B QAT: multimodal, so vision rides on the same
-  endpoint, and ASR shares the same server.  Works with Ollama, vLLM,
-  llama.cpp, LM Studio out of the box.  Qwen3-VL-8B-Instruct at 32k
-  context is the tested alternative — same server, same backend, far
-  better at reading and clicking the screen, ~3 GB more RAM.  Which
+  running Qwen3-VL-8B-Instruct at 32k context: multimodal, so vision
+  rides on the same endpoint, and ASR shares the same server.  Works
+  with Ollama, vLLM, llama.cpp, LM Studio out of the box.  Which
   models were tried, which were rejected and why, and how to size the
   context window: [`docs/architecture.md`](docs/architecture.md) §8
   "Models evaluated".
@@ -93,9 +91,9 @@ cd voice-assistant
 # 1. Start the LLM+ASR server (any OpenAI-compatible).  Default is
 #    LocalAI at http://localhost:1240 with a multimodal model:
 #      brew install localai
-#      local-ai backends install llama-cpp && local-ai backends install whisper
-#      local-ai models install gemma-4-e4b-it-qat-q4_0
-#      local-ai models install whisper-large-q5_0
+#      local-ai backends install llama-cpp && local-ai backends install parakeet-cpp
+#      local-ai models install qwen3-vl-8b-instruct
+#      local-ai models install parakeet-cpp-tdt-0.6b-v3
 #      local-ai run --address 127.0.0.1:1240 --models-path ~/.localai/models
 #    Override LLM_URL / LLM_MODEL / WHISPER_URL in docker-compose.yml or .env.
 

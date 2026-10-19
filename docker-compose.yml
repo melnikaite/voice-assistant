@@ -40,16 +40,16 @@ services:
       WHISPER_URL: http://localhost:1240
       # whisper.cpp large-v3 q5_0 — model id must match the YAML name in
       # ~/.localai/models (LocalAI routes by the `model` form field).
-      WHISPER_MODEL: whisper-large-q5_0
-      # Gemma 4 E4B multimodal (text + vision + tool-calling), QAT q4_0 GGUF
-      # from LocalAI's own gallery.  The served-model id is a hard contract —
+      WHISPER_MODEL: parakeet-cpp-tdt-0.6b-v3
+      # Qwen3-VL-8B-Instruct multimodal (text + vision + tool-calling), Q4_K_M
+      # GGUF from LocalAI's own gallery.  The served-model id is a hard contract —
       # it must match the YAML name in ~/.localai/models.
       # Manual FALLBACK: any OpenAI-compatible endpoint works — e.g. Ollama
       # (`ollama serve`, LLM_URL=http://localhost:11434) or LM Studio.  The
       # former MLX stack (:1237/:18000) was fully retired 2026-06-12.
       LLM_URL: http://localhost:1240
-      LLM_MODEL: gemma-4-e4b-it-qat-q4_0
-      # Disables Gemma's ADAPTIVE thinking (llama.cpp/LocalAI accept "none");
+      LLM_MODEL: qwen3-vl-8b-instruct
+      # Disables ADAPTIVE thinking (llama.cpp/LocalAI accept "none");
       # measured 1-2 multi-second CoT episodes per 6 turns without it — a
       # voice reply cannot afford that.  Wins over per-call values in
       # llm_utils.chat()/chat_stream().
@@ -218,8 +218,8 @@ services:
       # WAKE_WORD_NAME (without the .onnx suffix) to switch model.
       WAKE_WORD_NAME: "hey_jarvis_v0.1"
       WAKE_WORD_THRESHOLD: "0.5"
-      # --- Vision (local Gemma 4 multimodal via mlx_vlm.server :1235) ---
-      # Vision rides on the SAME LLM endpoint (LLM_URL above) — Gemma 4
+      # --- Vision (the local multimodal LLM) ---
+      # Vision rides on the SAME LLM endpoint (LLM_URL above) — Qwen3-VL
       # is multimodal, so no separate provider, no API key, fully
       # offline as long as the LLM server is running on the host.  The
       # `look_at_screen` tool and the image-attached pipeline branch

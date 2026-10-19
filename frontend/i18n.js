@@ -273,9 +273,9 @@ export const CATALOG = {
   'stats.no_data':             { en: 'No data for selected period.', ru: 'Пока нет данных за выбранный период.', de: 'Keine Daten für den gewählten Zeitraum.' },
   // {total}, {prompt}, {completion} = formatted token counts
   'stats.tokens_summary':      {
-    en: 'Total tokens: {total} (prompt {prompt}, completion {completion}), local Gemma — free.',
-    ru: 'Всего токенов: {total} (prompt {prompt}, completion {completion}), локальный Gemma — бесплатно.',
-    de: 'Token gesamt: {total} (Prompt {prompt}, Completion {completion}), lokales Gemma — kostenlos.',
+    en: 'Total tokens: {total} (prompt {prompt}, completion {completion}), local model — free.',
+    ru: 'Всего токенов: {total} (prompt {prompt}, completion {completion}), локальная модель — бесплатно.',
+    de: 'Token gesamt: {total} (Prompt {prompt}, Completion {completion}), lokales Modell — kostenlos.',
   },
   // {usd_claude}, {usd_mini} = formatted dollar amounts
   'stats.cost_if':             {
