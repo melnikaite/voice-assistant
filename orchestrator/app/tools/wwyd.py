@@ -10,14 +10,14 @@ turn's ``AgentContext.services`` covers them (see ``wwyd_services``):
     mapped through the owner's ``audience_map`` (Settings), the owner
     asking about themself names it.
 
-``predict`` may answer ``needs``; only calendar free/busy is looked up
-(times only, from the target's own Mac); predict is asked again without the rest.
+``predict`` may answer ``needs``; only ``calendar.free_busy`` is looked up
+(times only, from the target's own Mac); every other need is answered
+``value: null``, so predict decides without it or escalates.
 """
 from __future__ import annotations
 
 import datetime as dt
 import logging
-import re
 
 from .. import wwyd
 from ..i18n import t
@@ -29,23 +29,8 @@ log = logging.getLogger(__name__)
 GUEST_KEY = "guest"
 FREEBUSY_DAYS = 7
 _FACT_MAX = 2000
-_UNAVAILABLE = "Not available to the assistant; answer without it."
-
-# wwyd's seeded category paths (SPEC §4.4); add_claims rejects unknown ones.
-CATEGORIES = [
-    "communication/style", "communication/boundaries", "work/meetings",
-    "work/decisions", "schedule/routine", "food", "travel", "money",
-    "health", "family", "hobbies", "tech",
-]
+DEFAULT_CATEGORY = "communication/style"
 KINDS = ["trait", "preference", "habit", "decision_rule", "style", "boundary"]
-
-_CALENDAR_NEED = re.compile(
-    r"calendar|free|busy|slot|availab|schedule|meeting|appointment|"
-    r"kalender|frei|termin|verfügbar|"
-    r"календар|свобод|занят|окн|встреч|расписан",
-    re.IGNORECASE,
-)
-
 
 async def wwyd_services(profile_id: int | None, mixed: bool) -> frozenset[str]:
     """Services for ``AgentContext.services``; never for mixed turns."""
@@ -90,7 +75,26 @@ def _pick_audience(spoken: str | None, audiences: list[dict]) -> str | None:
 
 
 def _is_calendar_need(need: dict) -> bool:
-    return bool(_CALENDAR_NEED.search(f"{need.get('what', '')} {need.get('why', '')}"))
+    # Unknown kinds read as "other".
+    return need.get("kind") == "calendar.free_busy"
+
+
+def _pick_category(spoken: str, paths: list[str]) -> str:
+    """The model's category → an existing path of this persona."""
+    needle = (spoken or "").strip().strip("/").lower()
+    by_lower = {p.lower(): p for p in paths}
+    if needle in by_lower:
+        return by_lower[needle]
+    # "meetings" → "work/meetings"; "work/x" → "work".
+    for p in paths:
+        if p.lower().rsplit("/", 1)[-1] == needle.rsplit("/", 1)[-1]:
+            return p
+    head = needle.split("/", 1)[0]
+    if head in by_lower:
+        return by_lower[head]
+    if DEFAULT_CATEGORY in paths or not paths:
+        return DEFAULT_CATEGORY
+    return paths[0]
 
 
 _FREEBUSY_SCRIPT = """
@@ -244,21 +248,26 @@ async def how_would_answer(
         "kind": kind if kind in ("reply", "decision") else "reply",
         "include_private": is_self,
     }
+    missing: list[str] = []
     try:
         out = await wwyd.call_tool(target_id, "predict", args)
         if out.get("type") == "needs":
-            needs = list(out.get("needs") or [])
+            needs = list(out.get("needs") or [])[:20]
             busy = None
             if any(_is_calendar_need(n) for n in needs):
                 await cx.progress("wwyd", "calendar")
                 busy = await calendar_free_busy(target_id)
-            # Only free/busy is ever looked up; everything else is answered without.
-            facts = [
-                {"what": str(n.get("what") or "?")[:500],
-                 "value": busy if busy and _is_calendar_need(n) else _UNAVAILABLE}
-                for n in needs
-            ]
-            out = await wwyd.call_tool(target_id, "predict", {**args, "facts": facts[:20]})
+            # null = "can't find out": wwyd decides without it and never asks again.
+            facts = []
+            for n in needs:
+                value = busy if busy and _is_calendar_need(n) else None
+                fact = {"what": str(n.get("what") or "?"), "value": value}
+                if n.get("kind"):
+                    fact["kind"] = n["kind"]
+                facts.append(fact)
+                if value is None:
+                    missing.append(fact["what"])
+            out = await wwyd.call_tool(target_id, "predict", {**args, "facts": facts})
     except wwyd.WwydError as exc:
         log.info("wwyd: predict failed: %s", exc.code)
         return ToolResult(t("wwyd.unavailable", lang), {"error": exc.code})
@@ -281,6 +290,11 @@ async def how_would_answer(
     data["escalate"] = out.get("escalate")
     if out.get("escalate") in ("rate_limited", "spend_cap", "llm_unavailable"):
         return ToolResult(t("wwyd.unavailable", lang), data)
+    if out.get("escalate") == "low_confidence" and missing:
+        # Low confidence because of facts we could not supply: say which.
+        data["missing"] = missing
+        return ToolResult(t("wwyd.needs_unmet", lang, name=target_name,
+                            needs=", ".join(missing)), data)
     return ToolResult(t("wwyd.ask_directly", lang, name=target_name), data)
 
 
@@ -305,7 +319,12 @@ def _remember_summary(args: dict) -> str:
         "properties": {
             "text": {"type": "string", "description": "One statement, third person, ≤ 500 chars."},
             "kind": {"type": "string", "enum": KINDS},
-            "category": {"type": "string", "enum": CATEGORIES},
+            # Categories are per persona; validated against list_categories at call time.
+            "category": {
+                "type": "string",
+                "description": "Category path, e.g. communication/style, work/meetings, "
+                               "schedule/routine, food, family.",
+            },
             "audience": {
                 "type": "string",
                 "description": "Who it applies to (e.g. 'clients'); omit for everyone.",
@@ -333,11 +352,11 @@ async def wwyd_remember(
     await cx.progress("wwyd", None)
     claim: dict = {
         "kind": kind if kind in KINDS else "preference",
-        "category": category if category in CATEGORIES else "communication/style",
         "text": text.strip()[:500],
         "status": "approved",
     }
     try:
+        claim["category"] = _pick_category(category, await wwyd.list_category_paths(cx.profile_id))
         if audience:
             name = _pick_audience(audience, await wwyd.list_audiences(cx.profile_id))
             if name:

@@ -5,7 +5,7 @@ POST   /api/wwyd/connect         — start OAuth (DCR + PKCE); returns the autho
 GET    /api/wwyd/callback        — OAuth redirect target; stores the tokens
 POST   /api/wwyd/api-key         — connect with a pasted API key instead
 PUT    /api/wwyd/audiences       — asker → wwyd audience mapping
-DELETE /api/wwyd                 — revoke at wwyd (best effort) and forget locally
+DELETE /api/wwyd                 — revoke the grant or API key at wwyd (best effort), forget locally
 
 All endpoints act on the cookie session's profile.  Tokens never leave
 the server: responses carry the URL, auth kind and mapping only.
@@ -109,8 +109,14 @@ async def api_wwyd_callback(
         return RedirectResponse("/?wwyd=denied", status_code=303)
     try:
         tokens = await wwyd.exchange_code(pending, code)
+        await wwyd.probe(pending["resource"], tokens["access_token"])
     except wwyd.WwydError as exc:
-        log.warning("wwyd: code exchange failed for profile %d: %s", user["profile_id"], exc.code)
+        log.warning("wwyd: connect failed for profile %d: %s", user["profile_id"], exc.code)
+        if exc.code == "version":
+            # Don't keep a grant we won't use.
+            await wwyd.revoke({"auth_kind": "oauth", "client_id": pending["client_id"],
+                               "revocation_endpoint": pending["revocation_endpoint"], **tokens})
+            return RedirectResponse("/?wwyd=version", status_code=303)
         return RedirectResponse("/?wwyd=failed", status_code=303)
     await save_wwyd_connection(
         user["profile_id"], base_url=pending["base_url"], resource=pending["resource"],
@@ -127,9 +133,9 @@ async def api_wwyd_api_key(body: ApiKeyBody, user: dict = Depends(_current_user)
     try:
         base = wwyd.normalize_base_url(body.url)
         resource = f"{base}/mcp"
-        tools = await wwyd.probe_key(resource, body.key.strip())
+        tools = await wwyd.probe(resource, body.key.strip())
     except wwyd.WwydError as exc:
-        status = 400 if exc.code in ("invalid", "auth") else 502
+        status = 400 if exc.code in ("invalid", "auth", "version") else 502
         raise HTTPException(status, "wwyd refused the key" if exc.code == "auth" else str(exc)) from None
     # Ingest and add_claims need the owner scope.
     if not {"ingest_raw", "add_claims", "predict"} <= set(tools):

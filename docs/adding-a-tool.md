@@ -133,6 +133,9 @@ A tool that talks to a per-profile external service (today: wwyd) declares
 whose services are missing are left out of the schema the LLM sees and refused
 at dispatch with `tool.service_not_connected`.  Add your service to the
 pipeline's `services=` when you introduce a new one.
+Values that come from the service (wwyd categories, audiences) stay out of the
+schema's `enum`: describe them with examples and map the model's value onto the
+service's list at call time (cache it briefly per profile).
 
 ### `terminal=False` — chaining
 

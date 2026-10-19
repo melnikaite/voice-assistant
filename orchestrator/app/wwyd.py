@@ -35,6 +35,8 @@ _TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 # Predict makes up to two LLM calls on the wwyd side.
 _TOOL_TIMEOUT = httpx.Timeout(90.0, connect=5.0)
 _REFRESH_MARGIN_S = 60
+# Pre-1.0 wwyd bumps the minor on breaking changes (docs/clients.md § Versioning).
+COMPATIBLE_SERIES = (0, 1)
 # Test hook: an httpx transport standing in for the wwyd server.
 _TRANSPORT: httpx.AsyncBaseTransport | None = None
 
@@ -109,7 +111,14 @@ async def register_client(registration_endpoint: str, redirect_uri: str) -> str:
         except httpx.HTTPError as exc:
             raise WwydError("transport", f"registration failed: {exc.__class__.__name__}") from exc
     if r.status_code not in (200, 201):
-        raise WwydError("protocol", f"registration refused (HTTP {r.status_code})")
+        detail = ""
+        try:
+            body = r.json()
+            detail = body.get("error_description") or body.get("error") or ""
+        except ValueError:
+            pass
+        # e.g. an http redirect URI on a server that forbids insecure redirects.
+        raise WwydError("protocol", f"wwyd refused to register this assistant: {detail or f'HTTP {r.status_code}'}")
     return r.json()["client_id"]
 
 
@@ -170,20 +179,21 @@ async def exchange_code(pending: dict, code: str) -> dict:
 
 
 async def revoke(conn: dict) -> bool:
-    """Best effort: revoke the grant at wwyd.  API keys are revoked on wwyd's
-    account page, so this only applies to OAuth connections."""
-    endpoint = conn.get("revocation_endpoint")
-    if conn.get("auth_kind") != "oauth" or not endpoint:
+    """Best effort: revoke the grant or the API key at wwyd (RFC 7009)."""
+    if conn.get("auth_kind") == "oauth":
+        endpoint = conn.get("revocation_endpoint")
+        token = conn.get("refresh_token") or conn.get("access_token")
+        hint = "refresh_token" if conn.get("refresh_token") else "access_token"
+        form = {"token": token, "token_type_hint": hint, "client_id": conn.get("client_id") or ""}
+    else:
+        # API keys need no client authentication.
+        endpoint = conn.get("revocation_endpoint") or f"{conn['base_url']}/revoke"
+        form = {"token": conn.get("access_token")}
+    if not endpoint or not form["token"]:
         return False
-    token = conn.get("refresh_token") or conn.get("access_token")
-    hint = "refresh_token" if conn.get("refresh_token") else "access_token"
     async with _client() as c:
         try:
-            r = await c.post(endpoint, data={
-                "token": token, "token_type_hint": hint, "client_id": conn.get("client_id") or "",
-                # The MCP SDK's revocation form requires the field even for public clients.
-                "client_secret": "",
-            })
+            r = await c.post(endpoint, data=form)
         except httpx.HTTPError:
             log.warning("wwyd: revoke request failed")
             return False
@@ -232,7 +242,24 @@ def _parse_rpc(r: httpx.Response, req_id: int) -> dict:
         raise WwydError("protocol", "non-JSON response") from exc
 
 
+def check_version(version: str | None) -> None:
+    """Refuse servers outside the wwyd series this client was written for."""
+    try:
+        major, minor = (int(x) for x in str(version or "").split("-")[0].split(".")[:2])
+    except ValueError:
+        major = minor = -1
+    if (major, minor) != COMPATIBLE_SERIES:
+        want = ".".join(map(str, COMPATIBLE_SERIES))
+        raise WwydError("version", f"wwyd {version or '(unknown version)'} is not supported; "
+                                   f"this assistant works with wwyd {want}.x")
+
+
 async def _mcp_call(resource: str, token: str, method: str, params: dict) -> dict:
+    return (await _mcp_session(resource, token, method, params))[1]
+
+
+async def _mcp_session(resource: str, token: str, method: str, params: dict) -> tuple[dict, dict]:
+    """initialize + one call; returns (initialize result, call result)."""
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json, text/event-stream",
@@ -278,7 +305,7 @@ async def _mcp_call(resource: str, token: str, method: str, params: dict) -> dic
             raise WwydError("transport", exc.__class__.__name__) from exc
     if "error" in msg:
         raise WwydError("protocol", str(msg["error"].get("message", "rpc error"))[:200])
-    return msg.get("result") or {}
+    return init.get("result") or {}, msg.get("result") or {}
 
 
 def _tool_payload(result: dict) -> dict:
@@ -311,9 +338,11 @@ async def call_tool(profile_id: int, name: str, arguments: dict) -> dict:
     return _tool_payload(await _mcp_call(conn["resource"], token, "tools/call", params))
 
 
-async def probe_key(resource: str, key: str) -> list[str]:
-    """Check a pasted API key: returns the tool names it can see."""
-    result = await _mcp_call(resource, key, "tools/list", {})
+async def probe(resource: str, token: str) -> list[str]:
+    """Check a new connection: the server version must be compatible;
+    returns the tool names the token can see."""
+    init, result = await _mcp_session(resource, token, "tools/list", {})
+    check_version((init.get("serverInfo") or {}).get("version"))
     return [t.get("name") for t in result.get("tools") or []]
 
 
@@ -321,6 +350,28 @@ async def list_audiences(profile_id: int) -> list[dict]:
     """wwyd audiences: ``[{name, description, is_default, claim_count}]``."""
     out = await call_tool(profile_id, "list_audiences", {})
     return list(out.get("audiences") or [])
+
+
+_CATEGORY_TTL_S = 300
+_categories_cache: dict[int, tuple[float, list[str]]] = {}
+
+
+async def list_category_paths(profile_id: int) -> list[str]:
+    """Flat category paths of the persona (they are per persona and the owner
+    can add more); cached briefly per profile."""
+    hit = _categories_cache.get(profile_id)
+    if hit and time.monotonic() - hit[0] < _CATEGORY_TTL_S:
+        return hit[1]
+    out = await call_tool(profile_id, "list_categories", {})
+    paths: list[str] = []
+    stack = list(out.get("categories") or [])
+    while stack:
+        node = stack.pop(0)
+        if isinstance(node, dict) and node.get("path"):
+            paths.append(str(node["path"]))
+            stack.extend(node.get("children") or [])
+    _categories_cache[profile_id] = (time.monotonic(), paths)
+    return paths
 
 
 async def is_connected(profile_id: int | None) -> bool:

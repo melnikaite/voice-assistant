@@ -30,6 +30,8 @@ class FakeWwyd:
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []  # (tool, arguments)
         self.revoked: list[str] = []
+        self.revoke_forms: list[dict] = []
+        self.version = "0.1.0"
         self.predict_replies: list[dict] = []
         self.access = SECRET_ACCESS
         self.reject_access_once = False
@@ -42,6 +44,13 @@ class FakeWwyd:
                 {"name": "everyone", "description": "anyone", "is_default": True},
                 {"name": "clients", "description": "customers, formal", "is_default": False},
                 {"name": "family", "description": "close family", "is_default": False},
+            ]}
+        if name == "list_categories":
+            leaf = lambda p, *c: {"path": p, "name": p.rsplit("/", 1)[-1], "children": list(c)}  # noqa: E731
+            return {"categories": [
+                leaf("communication", leaf("communication/style")),
+                leaf("work", leaf("work/meetings")), leaf("food"),
+                leaf("garden", leaf("garden/roses")),  # owner-added
             ]}
         if name == "predict":
             return self.predict_replies.pop(0)
@@ -76,7 +85,9 @@ class FakeWwyd:
                 "expires_in": 3600, "token_type": "Bearer",
             })
         if path == "/revoke":
-            self.revoked.append(parse_qs(req.content.decode())["token"][0])
+            form = {k: v[0] for k, v in parse_qs(req.content.decode(), keep_blank_values=True).items()}
+            self.revoke_forms.append(form)
+            self.revoked.append(form["token"])
             return httpx.Response(200)
         if path == "/mcp":
             if req.method == "DELETE":
@@ -88,7 +99,9 @@ class FakeWwyd:
             if msg["method"] == "initialize":
                 return httpx.Response(
                     200, headers={"mcp-session-id": "s1"},
-                    json={"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": "2025-11-25"}},
+                    json={"jsonrpc": "2.0", "id": msg["id"], "result": {
+                        "protocolVersion": "2025-11-25",
+                        "serverInfo": {"name": "wwyd", "version": self.version}, "x-new": 1}},
                 )
             if "id" not in msg:
                 return httpx.Response(202)
@@ -108,6 +121,7 @@ class FakeWwyd:
 def fake(monkeypatch):
     f = FakeWwyd()
     monkeypatch.setattr(wwyd, "_TRANSPORT", httpx.MockTransport(f.handler))
+    monkeypatch.setattr(wwyd, "_categories_cache", {})
     return f
 
 
@@ -172,6 +186,9 @@ async def test_oauth_connect_callback_and_disconnect(fake, caplog):
 
         assert c.delete("/api/wwyd").json() == {"ok": True, "removed": True, "revoked": True}
         assert fake.revoked == [conn["refresh_token"]]
+        # Public client: client_id only, no empty client_secret.
+        assert fake.revoke_forms[-1] == {"token": conn["refresh_token"],
+                                         "token_type_hint": "refresh_token", "client_id": "cli_1"}
         assert await get_wwyd_connection(pid) is None
     assert "SECRET" not in caplog.text
 
@@ -191,6 +208,51 @@ async def test_api_key_connect_requires_owner_scope(fake, monkeypatch):
         assert conn["auth_kind"] == "api_key" and conn["refresh_token"] is None
         bad = c.post("/api/wwyd/api-key", json={"url": BASE, "key": "wwyd_wrongkey_" + "x" * 24})
         assert bad.status_code == 400
+        # Disconnect revokes the key itself, without client authentication.
+        assert c.delete("/api/wwyd").json()["revoked"] is True
+        assert fake.revoke_forms[-1] == {"token": fake.access}
+
+
+@pytest.mark.parametrize("version", ["0.2.0", "1.0.0", "", "0.0.9"])
+async def test_connect_refuses_incompatible_server(fake, version):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.storage import create_session
+
+    pid = await _profile("Ann")
+    fake.version = version
+    fake.access = "wwyd_abcdefgh_" + "k" * 24
+    with TestClient(app) as c:
+        c.cookies.set("va_session", await create_session(pid))
+        r = c.post("/api/wwyd/api-key", json={"url": BASE, "key": fake.access})
+        assert r.status_code == 400 and "0.1.x" in r.json()["detail"]
+        assert await get_wwyd_connection(pid) is None
+
+        q = parse_qs(urlsplit(c.post("/api/wwyd/connect", json={"url": BASE}).json()["authorize_url"]).query)
+        r = c.get("/api/wwyd/callback", params={"state": q["state"][0], "code": "code-1"},
+                  follow_redirects=False)
+        assert r.headers["location"] == "/?wwyd=version"
+        assert await get_wwyd_connection(pid) is None
+        assert fake.revoked  # the unused grant is given back
+
+
+def test_version_check_accepts_0_1_series():
+    for v in ("0.1.0", "0.1.7", "0.1.0-rc.1"):
+        wwyd.check_version(v)
+    for v in ("0.2.0", "1.1.0", None, "garbage"):
+        with pytest.raises(wwyd.WwydError):
+            wwyd.check_version(v)
+
+
+async def test_registration_refusal_explains_why(monkeypatch):
+    def refuse(req):
+        return httpx.Response(400, json={
+            "error": "invalid_redirect_uri",
+            "error_description": "http redirect URIs are only accepted for loopback hosts on this server"})
+
+    monkeypatch.setattr(wwyd, "_TRANSPORT", httpx.MockTransport(refuse))
+    with pytest.raises(wwyd.WwydError, match="loopback hosts"):
+        await wwyd.register_client(f"{BASE}/register", "http://192.168.1.5:8080/api/wwyd/callback")
 
 
 def test_plain_http_only_on_loopback():
@@ -289,27 +351,39 @@ async def test_needs_only_calendar_is_looked_up(fake, monkeypatch):
 
     monkeypatch.setattr(tool_mod, "calendar_free_busy", fake_busy)
     fake.predict_replies = [
-        {"type": "needs", "needs": [{"what": "free slots on Tuesday", "why": "decision_rule clm_2"}]},
+        {"type": "needs", "needs": [{"kind": "calendar.free_busy", "what": "free slots on Tuesday",
+                                     "why": "decision_rule clm_2"}]},
         {"type": "answer", "answer": "Tuesday 14:00 works.", "confidence": 0.8, "disclosure": "d"},
     ]
     r = await tool_mod.how_would_answer("meet Tuesday?", ctx=_Ctx(owner, frozenset({"wwyd", "wwyd_ask"})))
     assert looked == [owner]
     facts = fake.calls[-1][1]["facts"]
-    assert facts == [{"what": "free slots on Tuesday", "value": "Busy times …: Tue 2026-10-20 10:00-11:00"}]
+    assert facts == [{"what": "free slots on Tuesday", "value": "Busy times …: Tue 2026-10-20 10:00-11:00",
+                      "kind": "calendar.free_busy"}]
     assert r.text == "Tuesday 14:00 works."
 
-    # Anything else is never looked up: predict is asked to answer without it.
+    # Anything else is never looked up, even if it mentions the calendar,
+    # and unknown kinds read as "other": answered null.
     looked.clear()
     fake.calls.clear()
     fake.predict_replies = [
-        {"type": "needs", "needs": [{"what": "home address of the guest", "why": "r"}]},
-        {"type": "needs", "needs": [{"what": "home address of the guest", "why": "r"}]},
+        {"type": "needs", "needs": [
+            {"kind": "contact.relationship", "what": "who the guest is to Eugene", "why": "r"},
+            {"kind": "weather.forecast", "what": "calendar of local holidays", "why": "r"}]},
+        {"type": "escalate", "escalate": "low_confidence", "reason": "x", "hints": []},
     ]
     r = await tool_mod.how_would_answer("visit?", ctx=_Ctx(owner, frozenset({"wwyd", "wwyd_ask"})))
     assert looked == [] and [c[0] for c in fake.calls] == ["predict", "predict"]
     assert fake.calls[-1][1]["facts"] == [
-        {"what": "home address of the guest", "value": tool_mod._UNAVAILABLE}]
-    assert r.data["type"] == "needs" and "home address" in r.text
+        {"what": "who the guest is to Eugene", "value": None, "kind": "contact.relationship"},
+        {"what": "calendar of local holidays", "value": None, "kind": "weather.forecast"}]
+    # Low confidence for want of those facts: say which ones.
+    assert r.data["escalate"] == "low_confidence" and "who the guest is" in r.text
+
+    # A plain low-confidence answer still sends the asker to the person.
+    fake.predict_replies = [{"type": "escalate", "escalate": "low_confidence", "reason": "x"}]
+    r = await tool_mod.how_would_answer("visit?", ctx=_Ctx(owner, frozenset({"wwyd", "wwyd_ask"})))
+    assert "ask Eugene directly" in r.text
 
 
 def test_free_busy_has_times_only():
@@ -337,6 +411,24 @@ async def test_remember_adds_approved_claim(fake):
                                "text": "Answers clients briefly and formally.",
                                "status": "approved", "audiences": ["clients"]}]
     assert "Saved to wwyd" in r.text
+
+
+@pytest.mark.parametrize("spoken,expected", [
+    ("garden/roses", "garden/roses"),   # owner-added category
+    ("Meetings", "work/meetings"),      # leaf name
+    ("food/vegan", "food"),             # unknown child → existing parent
+    ("hobbies", "communication/style"),  # not in this persona → default
+])
+async def test_remember_category_from_persona(fake, spoken, expected):
+    from app.tools.wwyd import wwyd_remember
+
+    owner = await _profile("Eugene")
+    await _connect(owner)
+    await wwyd_remember("x", "habit", spoken, ctx=_Ctx(owner, frozenset({"wwyd"})))
+    await wwyd_remember("y", "habit", spoken, ctx=_Ctx(owner, frozenset({"wwyd"})))
+    assert fake.calls[-1][1]["claims"][0]["category"] == expected
+    # Cached per profile: one list_categories for two claims.
+    assert [c[0] for c in fake.calls].count("list_categories") == 1
 
 
 # ── Automatic write path ────────────────────────────────────────────────

@@ -2868,7 +2868,8 @@ document.querySelector('#wwyd-disconnect-btn')?.addEventListener('click', discon
     const panel = document.querySelector('#settings-panel');
     if (panel) panel.open = true;
     if (result !== 'connected' && wwydStatusEl) {
-      wwydStatusEl.textContent = i18n('wwyd.failed', { err: result });
+      wwydStatusEl.textContent = result === 'version'
+        ? i18n('wwyd.version') : i18n('wwyd.failed', { err: result });
     }
     history.replaceState(null, '', window.location.pathname);
   }

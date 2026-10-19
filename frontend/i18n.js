@@ -380,6 +380,7 @@ export const CATALOG = {
   'wwyd.not_connected': { en: 'Not connected.', ru: 'Не подключён.', de: 'Nicht verbunden.' },
   'wwyd.connected':     { en: 'Connected: {url}', ru: 'Подключён: {url}', de: 'Verbunden: {url}' },
   'wwyd.redirecting':   { en: 'Opening wwyd to sign in…', ru: 'Открываю wwyd для входа…', de: 'Öffne wwyd zur Anmeldung…' },
+  'wwyd.version':       { en: 'This wwyd version is not supported (needs 0.1.x).', ru: 'Эта версия wwyd не поддерживается (нужна 0.1.x).', de: 'Diese wwyd-Version wird nicht unterstützt (benötigt 0.1.x).' },
   'wwyd.failed':        { en: 'Connection failed: {err}', ru: 'Не удалось подключить: {err}', de: 'Verbindung fehlgeschlagen: {err}' },
   'wwyd.unreachable':   { en: 'Connected, but wwyd is not reachable right now.', ru: 'Подключён, но wwyd сейчас недоступен.', de: 'Verbunden, aber wwyd ist gerade nicht erreichbar.' },
   'wwyd.audiences_hint': {

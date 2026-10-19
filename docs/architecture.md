@@ -703,8 +703,11 @@ callback (`/api/wwyd/callback`) requires the same cookie profile that started th
 single-use `state` (10-min TTL).  Access tokens (1 h) are refreshed before expiry and once on
 a 401; wwyd rotates the refresh token on every use.  An owner-scope API key can be pasted
 instead.  Tokens live in `wwyd_connections` like the other local secrets (plaintext in the
-local DB), are never returned by the API and never logged.  Disconnect revokes the grant at
-wwyd (`/revoke`; API keys are revoked on wwyd's account page) and deletes the row.
+local DB), are never returned by the API and never logged.  Disconnect revokes at wwyd's
+`/revoke` (RFC 7009: the grant with `client_id` only, or the API key itself as `token`) and
+deletes the row.  Both connect paths read `serverInfo.version` from `initialize` and refuse
+anything outside wwyd 0.1.x (pre-1.0 wwyd breaks on minor bumps); the contract followed is
+wwyd's `docs/clients.md`, and unknown response fields are ignored.
 Plain `http://` is accepted for loopback only.  wwyd itself is only linked ("Open wwyd"),
 never embedded.
 
@@ -715,7 +718,7 @@ than the MCP SDK, to avoid a dependency for four tools.
 **Who is who.**  wwyd has no contact identities, only owner-defined *audiences* (slugs with a
 description).  The mapping lives here: `wwyd_connections.audience_map` maps
 `profile:<id>` (another household member, by voice or their linked Telegram) and `guest`
-(unrecognised voice) to an audience; unmapped askers get wwyd's default audience.  Names
+(unrecognised voice) to an audience; unmapped askers get wwyd's `default` alias (the persona's default audience, whatever it is named).  Names
 never go to wwyd.
 
 **Tool visibility.**  Both tools are `tier="api"`; the pipeline sets
@@ -729,14 +732,18 @@ never go to wwyd.
 **Read path — `how_would_answer`.**  Target = the named person, else the speaker, else the
 only connected profile.  The owner asking about themself names the audience and gets
 `include_private`; anyone else is answered as their mapped audience (the model's `audience`
-argument is ignored) and always hears wwyd's `disclosure` first.  On `needs`, only calendar
-free/busy is looked up — a fixed read-only AppleScript on the target's own paired Mac
-returning start/end times for 7 days, never titles, attendees or places — and every other
-need is passed back as "not available", so wwyd answers without it.  Whether to auto-reply or
+argument is ignored) and always hears wwyd's `disclosure` first.  On `needs`, only a need of
+kind `calendar.free_busy` is looked up (unknown kinds count as `other`) — a fixed read-only
+AppleScript on the target's own paired Mac returning start/end times for 7 days, never
+titles, attendees or places — and every other need is sent back with `value: null`, so wwyd
+decides without it or escalates `low_confidence`; the reply then names the missing facts.  Whether to auto-reply or
 draft stays with the assistant; this tool only speaks the prediction.
 
 **Write path, explicit — `wwyd_remember`** (`low_write`): one third-person statement with
-kind and a seeded category → `add_claims` with `status: approved` (the owner said it).
+kind and a category → `add_claims` with `status: approved` (the owner said it).  Categories are per persona and
+the owner can add more, so the schema carries no enum (a per-turn enum would cost a wwyd
+call before every turn): the model's path is matched against `list_categories` (cached 5 min
+per profile) by exact path, leaf name or parent, else `communication/style`.
 
 **Write path, automatic — `wwyd_capture`.**  After the reply has been sent (the pipeline's
 `finally`), the turn is queued for the identified owner only; a cheap first-person/"tell X"
