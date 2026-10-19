@@ -55,6 +55,12 @@ def _fmt_reminder_for_list(r: dict, now: float, lang: str | None) -> str:
     return f"«{push_text}» {when}"
 
 
+def reminder_focus(entry: str, fire_ts: float) -> str:
+    """Focus value for a listed reminder; the absolute time lets 'an hour
+    before it' be computed after the relative wording has gone stale."""
+    return f"{entry} ({datetime.fromtimestamp(fire_ts).isoformat(timespec='minutes')})"
+
+
 # ── Fuzzy cancel matching ──────────────────────────────────────────────────
 
 # Tokenise on word characters, NOT whitespace: the stored push_text comes out
@@ -167,7 +173,7 @@ async def _run(
                 count=len(entries), joined="; ".join(entries),
             )
         # The soonest one is what "remind me about it" most likely means.
-        return ToolResult(text=reply, data={"reminders": upcoming, "focus": {"reminder": entries[0]}})
+        return ToolResult(text=reply, data={"reminders": upcoming, "focus": {"reminder": reminder_focus(entries[0], upcoming[0]["fire_at"])}})
 
     # ── cancel ────────────────────────────────────────────────────────────
     if action == "cancel":
@@ -321,7 +327,7 @@ _LABEL_DESC = (
         "required": ["duration"],
     },
     risk="low_write",
-    focus={"text": "reminder"},
+    # No focus: a timer label would displace the reminder "об этом" points to.
 )
 async def set_timer(*, ctx, duration: str, text: str | None = None) -> ToolResult:
     seconds = _parse_iso_duration(duration)

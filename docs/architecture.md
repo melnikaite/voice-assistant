@@ -588,10 +588,17 @@ profile's last-used category (`speaker_profiles.last_category_id`).  Measured wi
 21/36, claimed-without-tool replies 17 → 1.  Query rewriting, replaying tool calls and a prose
 summary were measured and rejected (no gain or +2–4 s on the voice path).
 
-Still open: the reminder follow-up ("напомни об этом") — the model writes the pronoun into
-`text` although the focus line names the reminder; subjects that never went through a
-slot-mapped tool (Munich via `general_answer`) survive only via the summary and are lost
-after ~16 turns.
+The reminder follow-up ("напомни об этом за час") needed two more things: `set_timer` no
+longer fills the `reminder` slot (a fresh "таймер" label displaced the listed appointment),
+and `list_reminders` puts the absolute fire time into the focus value so "an hour before"
+is computable — qwen 0/9 → 6/9, fire time checked by the probe.  The population case
+dropped at N=8 (6/6 → 0/6) for the same reason: the stale "таймер" slot was the only thing
+rendering the focus line, and that instruction alone made the model resolve "там".  Subjects
+from `general_answer` have no slot, and at N=8 the filler's last place is Ottawa, so the
+case was passing by accident.
+
+Still open: focus expires after `FOCUS_TTL_TURNS`, so at N=16 subjects survive only via the
+summary and are mostly lost.
 
 ### TODO: `web_search` replies leak the source language
 

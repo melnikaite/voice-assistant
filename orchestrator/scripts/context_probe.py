@@ -30,6 +30,7 @@ import statistics
 import sys
 import tempfile
 import time
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -53,6 +54,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import agent, llm_utils  # noqa: E402
 from app.agent import AgentContext, ToolInvocation, run_agent  # noqa: E402
+from app.tools.set_reminder import _parse_iso_duration, reminder_focus  # noqa: E402
 
 llm_utils._fire_record_usage = lambda *a, **k: None  # no token_usage rows
 
@@ -110,6 +112,28 @@ def _called(tool: str | tuple, *needles: str, reply_ok: bool = False):
 def U(s): return {"role": "user", "content": s}
 
 
+_DENTIST = (datetime.now() + timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
+
+
+def _fires_at(calls: list[ToolInvocation], want: datetime) -> bool:
+    """A created reminder fires within 5 min of ``want``."""
+    for c in calls:
+        try:
+            if c.name == "set_reminder_at":
+                got = datetime.fromisoformat(c.args["fire_at"])
+                if got.tzinfo:
+                    got = got.astimezone().replace(tzinfo=None)
+            elif c.name == "set_timer":
+                got = datetime.now() + timedelta(seconds=_parse_iso_duration(c.args["duration"]) or 0)
+            else:
+                continue
+        except (KeyError, ValueError, TypeError):
+            continue
+        if abs((got - want).total_seconds()) <= 300:
+            return True
+    return False
+
+
 _MUC = "Мюнхен — столица Баварии, третий по величине город Германии, известен Октоберфестом."
 _LIS = "Лиссабон — столица Португалии, стоит на семи холмах у устья Тежу."
 CASES = [
@@ -127,9 +151,10 @@ CASES = [
     Case("reminder",
          Turn("Когда у меня завтра стоматолог?", "Запись к стоматологу завтра в 15:00.",
               [("list_reminders", {}, "Завтра 15:00 — стоматолог.",
-                {"focus": {"reminder": "стоматолог, завтра в 15:00"}})]),
+                {"focus": {"reminder": reminder_focus("«стоматолог» завтра в 15:00", _DENTIST.timestamp())}})]),
          "Напомни мне об этом за час.",
-         _called(("set_reminder_at", "set_timer"), "стомат", "dentist", "зуб")),
+         lambda calls, reply: _called(("set_reminder_at", "set_timer"), "стомат", "dentist", "зуб")(calls, reply)
+         and _fires_at(calls, _DENTIST - timedelta(hours=1))),
     Case("population",
          Turn("Расскажи коротко про Лиссабон.", _LIS,
               [("general_answer", {"question": "Расскажи коротко про Лиссабон"}, _LIS)]),
