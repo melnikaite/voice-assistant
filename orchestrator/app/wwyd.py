@@ -36,7 +36,7 @@ _TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 _TOOL_TIMEOUT = httpx.Timeout(90.0, connect=5.0)
 _REFRESH_MARGIN_S = 60
 # Pre-1.0 wwyd bumps the minor on breaking changes (docs/clients.md § Versioning).
-COMPATIBLE_SERIES = (0, 1)
+COMPATIBLE_SERIES = (0, 2)
 # Test hook: an httpx transport standing in for the wwyd server.
 _TRANSPORT: httpx.AsyncBaseTransport | None = None
 

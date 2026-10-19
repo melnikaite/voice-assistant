@@ -10,9 +10,9 @@ turn's ``AgentContext.services`` covers them (see ``wwyd_services``):
     mapped through the owner's ``audience_map`` (Settings), the owner
     asking about themself names it.
 
-``predict`` may answer ``needs``; only ``calendar.free_busy`` is looked up
-(times only, from the target's own Mac); every other need is answered
-``value: null``, so predict decides without it or escalates.
+``predict`` answers are sendable as is; when one comes with ``depends_on``,
+the target's own Mac calendar (times only) is turned into a one-line
+conclusion by the local LLM, and only that goes back as ``context``.
 """
 from __future__ import annotations
 
@@ -72,11 +72,6 @@ def _pick_audience(spoken: str | None, audiences: list[dict]) -> str | None:
         if len(needle) >= 3 and needle[:4] in hay:
             return a["name"]
     return None
-
-
-def _is_calendar_need(need: dict) -> bool:
-    # Unknown kinds read as "other".
-    return need.get("kind") == "calendar.free_busy"
 
 
 def _pick_category(spoken: str, paths: list[str]) -> str:
@@ -156,6 +151,40 @@ async def calendar_free_busy(profile_id: int) -> str | None:
     if res.get("exit") not in (0, None):
         return None
     return _format_busy(res.get("stdout") or "", dt.datetime.now().replace(second=0, microsecond=0))
+
+
+CONTEXT_PROMPT = (
+    "A person's real reply to a situation depends on something their persona cannot "
+    "know.  You get the situation, what the reply depends on, and the person's busy "
+    "times.  If the busy times settle it, answer with one short sentence stating only "
+    "the conclusion (for example \"free tomorrow from 14:00 to 16:00\"), in the "
+    "language of the dependency, never listing the schedule.  If they do not, answer "
+    "NONE."
+)
+
+
+async def _calendar_context(profile_id: int, situation: str, depends_on: str) -> str | None:
+    """A one-line conclusion from the owner's calendar for ``depends_on``;
+    the schedule itself never leaves this machine."""
+    from ..llm_utils import chat, extract_text
+
+    busy = await calendar_free_busy(profile_id)
+    if not busy:
+        return None
+    try:
+        choice = await chat(
+            [{"role": "system", "content": CONTEXT_PROMPT},
+             {"role": "user", "content": f"Situation: {situation[:2000]}\n"
+                                         f"Depends on: {depends_on}\nBusy times: {busy}"}],
+            temperature=0.0, max_tokens=80, tool_name="<wwyd_context>",
+        )
+    except Exception as exc:  # the first answer stands
+        log.info("wwyd: context step failed: %s", exc.__class__.__name__)
+        return None
+    text = extract_text(choice["message"]).strip().strip('"')
+    if not text or text.upper().startswith("NONE"):
+        return None
+    return text[:_FACT_MAX]
 
 
 async def _resolve_target(person: str | None, speaker_id: int | None) -> tuple[int, str] | str:
@@ -248,26 +277,15 @@ async def how_would_answer(
         "kind": kind if kind in ("reply", "decision") else "reply",
         "include_private": is_self,
     }
-    missing: list[str] = []
     try:
         out = await wwyd.call_tool(target_id, "predict", args)
-        if out.get("type") == "needs":
-            needs = list(out.get("needs") or [])[:20]
-            busy = None
-            if any(_is_calendar_need(n) for n in needs):
-                await cx.progress("wwyd", "calendar")
-                busy = await calendar_free_busy(target_id)
-            # null = "can't find out": wwyd decides without it and never asks again.
-            facts = []
-            for n in needs:
-                value = busy if busy and _is_calendar_need(n) else None
-                fact = {"what": str(n.get("what") or "?"), "value": value}
-                if n.get("kind"):
-                    fact["kind"] = n["kind"]
-                facts.append(fact)
-                if value is None:
-                    missing.append(fact["what"])
-            out = await wwyd.call_tool(target_id, "predict", {**args, "facts": facts})
+        # The answer is sendable as is; the calendar can only make it concrete.
+        depends_on = str(out.get("depends_on") or "").strip() if out.get("type") == "answer" else ""
+        if depends_on:
+            await cx.progress("wwyd", "calendar")
+            context = await _calendar_context(target_id, situation, depends_on)
+            if context:
+                out = await wwyd.call_tool(target_id, "predict", {**args, "context": context})
     except wwyd.WwydError as exc:
         log.info("wwyd: predict failed: %s", exc.code)
         return ToolResult(t("wwyd.unavailable", lang), {"error": exc.code})
@@ -278,23 +296,15 @@ async def how_would_answer(
     if typ == "answer":
         answer = str(out.get("answer") or "").strip()
         data["confidence"] = out.get("confidence")
+        data["depends_on"] = out.get("depends_on")
         if is_self:
             return ToolResult(answer, data)
         # Third parties always hear that this is automated (wwyd P5).
         disclosure = str(out.get("disclosure") or "").strip()
         return ToolResult(f"{disclosure} {answer}".strip(), data)
-    if typ == "needs":
-        what = ", ".join(str(n.get("what", "")) for n in out.get("needs") or [])
-        data["needs"] = out.get("needs") or []
-        return ToolResult(t("wwyd.needs_unmet", lang, name=target_name, needs=what), data)
     data["escalate"] = out.get("escalate")
     if out.get("escalate") in ("rate_limited", "spend_cap", "llm_unavailable"):
         return ToolResult(t("wwyd.unavailable", lang), data)
-    if out.get("escalate") == "low_confidence" and missing:
-        # Low confidence because of facts we could not supply: say which.
-        data["missing"] = missing
-        return ToolResult(t("wwyd.needs_unmet", lang, name=target_name,
-                            needs=", ".join(missing)), data)
     return ToolResult(t("wwyd.ask_directly", lang, name=target_name), data)
 
 

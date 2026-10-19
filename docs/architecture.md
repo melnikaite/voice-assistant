@@ -710,7 +710,7 @@ instead.  Tokens live in `wwyd_connections` like the other local secrets (plaint
 local DB), are never returned by the API and never logged.  Disconnect revokes at wwyd's
 `/revoke` (RFC 7009: the grant with `client_id` only, or the API key itself as `token`) and
 deletes the row.  Both connect paths read `serverInfo.version` from `initialize` and refuse
-anything outside wwyd 0.1.x (pre-1.0 wwyd breaks on minor bumps); the contract followed is
+anything outside wwyd 0.2.x (pre-1.0 wwyd breaks on minor bumps); the contract followed is
 wwyd's `docs/clients.md`, and unknown response fields are ignored.
 Plain `http://` is accepted for loopback only.  wwyd itself is only linked ("Open wwyd"),
 never embedded.
@@ -736,11 +736,13 @@ never go to wwyd.
 **Read path — `how_would_answer`.**  Target = the named person, else the speaker, else the
 only connected profile.  The owner asking about themself names the audience and gets
 `include_private`; anyone else is answered as their mapped audience (the model's `audience`
-argument is ignored) and always hears wwyd's `disclosure` first.  On `needs`, only a need of
-kind `calendar.free_busy` is looked up (unknown kinds count as `other`) — a fixed read-only
-AppleScript on the target's own paired Mac returning start/end times for 7 days, never
-titles, attendees or places — and every other need is sent back with `value: null`, so wwyd
-decides without it or escalates `low_confidence`; the reply then names the missing facts.  Whether to auto-reply or
+argument is ignored) and always hears wwyd's `disclosure` first.  wwyd's answer is always
+sendable; when it comes with `depends_on` (plain words: what the real answer depends on),
+the target's own paired Mac is asked for busy times — a fixed read-only AppleScript, start/end
+for 7 days, never titles, attendees or places — and the local LLM turns them into a one-line
+conclusion ("free tomorrow from 14:00 to 16:00") or NONE.  Only that conclusion goes back to
+`predict` as `context`; without a Mac, or when the calendar does not settle it, the first
+answer stands.  Whether to auto-reply or
 draft stays with the assistant; this tool only speaks the prediction.
 
 **Write path, explicit — `wwyd_remember`** (`low_write`): one third-person statement with
@@ -753,9 +755,11 @@ per profile) by exact path, leaf name or parent, else `communication/style`.
 `finally`), the turn is queued for the identified owner only; a cheap first-person/"tell X"
 regex skips most turns, and an in-memory per-profile drain — the conversation summary
 fold's pattern — asks the LLM which parts are the owner's own words: dictated messages
-(`message`, `from_owner`, audience from the recipient's mapping) or statements about
-themselves (`note`).  Requests to the assistant are dropped.  Items go to `ingest_raw`; wwyd
-derives claims that land PENDING for review in wwyd.  Unstripped code-word attempts, mixed
+or statements about themselves.  Requests to the assistant are dropped.  Items go to
+`ingest_raw` as wwyd episodes: a dictated message is a reply (`situation` says it was
+dictated, `said` is the text, audience from the recipient's mapping); a statement is `said`
+alone.  No category is sent: wwyd places episodes itself, and a path made up here could
+carry a name.  wwyd derives claims that land PENDING for review in wwyd.  Unstripped code-word attempts, mixed
 turns, guests and turns that already used a wwyd tool are never sent.
 
 **Measured.**  `scripts/wwyd_capture_probe.py` (15 hand-written ru/en/de utterances,

@@ -248,7 +248,6 @@
     "tool.service_not_connected": "That needs wwyd, and it isn't connected for this profile — connect it in Settings.",
     "wwyd.unknown_person": "I don't know how {name} would answer — they haven't connected wwyd.",
     "wwyd.which_person": "Whose answer should I predict?",
-    "wwyd.needs_unmet": "I can't tell how {name} would answer without: {needs}.",
     "wwyd.ask_directly": "I can't predict that confidently — better ask {name} directly.",
     "wwyd.unavailable": "wwyd isn't available right now.",
     "wwyd.remembered": "Saved to wwyd: {text}",

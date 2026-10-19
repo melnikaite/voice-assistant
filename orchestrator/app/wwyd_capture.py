@@ -7,7 +7,8 @@ background task — same coalescing pattern as the conversation summary
 fold — asks the LLM which parts are the owner's OWN words: messages they
 dictate to someone, voicemail replies, statements about themselves.
 Requests to the assistant are not.  Picked items go to wwyd's
-``ingest_raw``, where derived claims land PENDING for the owner's review.
+``ingest_raw`` as episodes, where derived claims land PENDING for the
+owner's review.
 
 Nothing here runs on the reply path: the turn has been answered before
 ``observe`` is called.  Turns are kept in memory only until classified.
@@ -19,7 +20,6 @@ import datetime as dt
 import json
 import logging
 import re
-import secrets
 from dataclasses import dataclass
 
 from . import wwyd
@@ -30,6 +30,8 @@ log = logging.getLogger(__name__)
 # Turns whose wwyd effect is explicit already.
 _SKIP_TOOLS = {"wwyd_remember", "how_would_answer"}
 _MAX_QUEUE = 20
+# A dictated message is a reply whose incoming message we never saw.
+MESSAGE_SITUATION = "The owner dictates a message to their voice assistant to send to someone."
 
 # Cheap gate before spending an LLM call: the owner speaks in the first
 # person, or tells someone something.
@@ -120,25 +122,25 @@ async def classify(texts: list[str]) -> list[dict]:
     return out
 
 
-async def _records(profile_id: int, items: list[dict], ts: str) -> list[dict]:
+async def _episodes(profile_id: int, items: list[dict], ts: str) -> list[dict]:
     conn = await get_wwyd_connection(profile_id)
     amap = (conn or {}).get("audience_map") or {}
     profiles = await list_profiles_by_name()
-    records = []
+    episodes = []
+    # No category: wwyd places episodes itself, and a path we made up could carry a name.
     for it in items:
         if it["type"] == "note":
-            records.append({"type": "note", "text": it["text"], "ts": ts})
+            episodes.append({"when": ts, "said": it["text"]})
             continue
-        rec = {"type": "message", "from_owner": True, "text": it["text"], "ts": ts,
-               "thread": secrets.token_hex(4)}
+        ep = {"when": ts, "situation": MESSAGE_SITUATION, "said": it["text"]}
         to = it["to"].lower()
         # Recipient name → household profile → owner's audience; names never leave.
         pid = next((p for p, n in profiles if to and (n.lower() == to or n.lower()[:3] == to[:3])), None)
         aud = amap.get(f"profile:{pid}") if pid is not None else None
         if aud:
-            rec["audience"] = aud
-        records.append(rec)
-    return records
+            ep["audience"] = aud
+        episodes.append(ep)
+    return episodes
 
 
 async def list_profiles_by_name() -> list[tuple[int, str]]:
@@ -156,9 +158,9 @@ async def _drain(profile_id: int) -> None:
             items = await classify([t.text for t in batch])
             if not items:
                 continue
-            records = await _records(profile_id, items, batch[-1].ts)
-            await wwyd.call_tool(profile_id, "ingest_raw", {"records": records})
-            log.info("wwyd: ingested %d record(s) for profile %d", len(records), profile_id)
+            episodes = await _episodes(profile_id, items, batch[-1].ts)
+            await wwyd.call_tool(profile_id, "ingest_raw", {"episodes": episodes})
+            log.info("wwyd: ingested %d episode(s) for profile %d", len(episodes), profile_id)
         except wwyd.WwydError as exc:
             log.warning("wwyd: ingest failed for profile %d: %s", profile_id, exc.code)
         except Exception as exc:  # the batch is dropped; content is never logged

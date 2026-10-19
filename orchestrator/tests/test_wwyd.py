@@ -31,7 +31,7 @@ class FakeWwyd:
         self.calls: list[tuple[str, dict]] = []  # (tool, arguments)
         self.revoked: list[str] = []
         self.revoke_forms: list[dict] = []
-        self.version = "0.1.0"
+        self.version = "0.2.0"
         self.predict_replies: list[dict] = []
         self.access = SECRET_ACCESS
         self.reject_access_once = False
@@ -57,7 +57,7 @@ class FakeWwyd:
         if name == "add_claims":
             return {"created": ["clm_1"], "absorbed": [], "dropped": []}
         if name == "ingest_raw":
-            return {"job_id": "job_1", "accepted": len(args["records"])}
+            return {"job_id": "job_1", "accepted": len(args["episodes"])}
         raise AssertionError(name)
 
     def handler(self, req: httpx.Request) -> httpx.Response:
@@ -213,7 +213,7 @@ async def test_api_key_connect_requires_owner_scope(fake, monkeypatch):
         assert fake.revoke_forms[-1] == {"token": fake.access}
 
 
-@pytest.mark.parametrize("version", ["0.2.0", "1.0.0", "", "0.0.9"])
+@pytest.mark.parametrize("version", ["0.1.0", "1.0.0", "", "0.0.9"])
 async def test_connect_refuses_incompatible_server(fake, version):
     from fastapi.testclient import TestClient
     from app.main import app
@@ -225,7 +225,7 @@ async def test_connect_refuses_incompatible_server(fake, version):
     with TestClient(app) as c:
         c.cookies.set("va_session", await create_session(pid))
         r = c.post("/api/wwyd/api-key", json={"url": BASE, "key": fake.access})
-        assert r.status_code == 400 and "0.1.x" in r.json()["detail"]
+        assert r.status_code == 400 and "0.2.x" in r.json()["detail"]
         assert await get_wwyd_connection(pid) is None
 
         q = parse_qs(urlsplit(c.post("/api/wwyd/connect", json={"url": BASE}).json()["authorize_url"]).query)
@@ -236,10 +236,10 @@ async def test_connect_refuses_incompatible_server(fake, version):
         assert fake.revoked  # the unused grant is given back
 
 
-def test_version_check_accepts_0_1_series():
-    for v in ("0.1.0", "0.1.7", "0.1.0-rc.1"):
+def test_version_check_accepts_0_2_series():
+    for v in ("0.2.0", "0.2.7", "0.2.0-rc.1"):
         wwyd.check_version(v)
-    for v in ("0.2.0", "1.1.0", None, "garbage"):
+    for v in ("0.1.0", "0.3.0", "1.2.0", None, "garbage"):
         with pytest.raises(wwyd.WwydError):
             wwyd.check_version(v)
 
@@ -338,49 +338,63 @@ async def test_owner_names_audience_and_sees_private(fake):
     assert r.text == "Dear client, …"
 
 
-async def test_needs_only_calendar_is_looked_up(fake, monkeypatch):
+async def test_depends_on_is_settled_from_calendar_conclusion(fake, monkeypatch):
+    from app import llm_utils
     from app.tools import wwyd as tool_mod
 
     owner = await _profile("Eugene")
     await _connect(owner)
-    looked: list[int] = []
+    busy = "Busy times …: Tue 2026-10-20 10:00-11:00"
+    seen: list[str] = []
 
     async def fake_busy(pid):
-        looked.append(pid)
-        return "Busy times …: Tue 2026-10-20 10:00-11:00"
+        return busy
+
+    async def chat(messages, **kw):
+        seen.append(messages[1]["content"])
+        return {"message": {"content": "free on Tuesday from 11:00"}}
 
     monkeypatch.setattr(tool_mod, "calendar_free_busy", fake_busy)
+    monkeypatch.setattr(llm_utils, "chat", chat)
     fake.predict_replies = [
-        {"type": "needs", "needs": [{"kind": "calendar.free_busy", "what": "free slots on Tuesday",
-                                     "why": "decision_rule clm_2"}]},
-        {"type": "answer", "answer": "Tuesday 14:00 works.", "confidence": 0.8, "disclosure": "d"},
+        {"type": "answer", "answer": "let me check and get back to you", "confidence": 0.7,
+         "depends_on": "Agrees if Tuesday around 14:00 is free.", "disclosure": "d"},
+        {"type": "answer", "answer": "Tuesday 14:00 works.", "confidence": 0.8,
+         "depends_on": None, "disclosure": "d"},
     ]
     r = await tool_mod.how_would_answer("meet Tuesday?", ctx=_Ctx(owner, frozenset({"wwyd", "wwyd_ask"})))
-    assert looked == [owner]
-    facts = fake.calls[-1][1]["facts"]
-    assert facts == [{"what": "free slots on Tuesday", "value": "Busy times …: Tue 2026-10-20 10:00-11:00",
-                      "kind": "calendar.free_busy"}]
+    assert "Agrees if Tuesday" in seen[0] and busy in seen[0]
+    first, second = (c[1] for c in fake.calls if c[0] == "predict")
+    assert "context" not in first
+    # Only the conclusion goes to wwyd, never the schedule.
+    assert second == {**first, "context": "free on Tuesday from 11:00"}
     assert r.text == "Tuesday 14:00 works."
 
-    # Anything else is never looked up, even if it mentions the calendar,
-    # and unknown kinds read as "other": answered null.
-    looked.clear()
-    fake.calls.clear()
-    fake.predict_replies = [
-        {"type": "needs", "needs": [
-            {"kind": "contact.relationship", "what": "who the guest is to Eugene", "why": "r"},
-            {"kind": "weather.forecast", "what": "calendar of local holidays", "why": "r"}]},
-        {"type": "escalate", "escalate": "low_confidence", "reason": "x", "hints": []},
-    ]
-    r = await tool_mod.how_would_answer("visit?", ctx=_Ctx(owner, frozenset({"wwyd", "wwyd_ask"})))
-    assert looked == [] and [c[0] for c in fake.calls] == ["predict", "predict"]
-    assert fake.calls[-1][1]["facts"] == [
-        {"what": "who the guest is to Eugene", "value": None, "kind": "contact.relationship"},
-        {"what": "calendar of local holidays", "value": None, "kind": "weather.forecast"}]
-    # Low confidence for want of those facts: say which ones.
-    assert r.data["escalate"] == "low_confidence" and "who the guest is" in r.text
 
-    # A plain low-confidence answer still sends the asker to the person.
+async def test_depends_on_without_conclusion_keeps_first_answer(fake, monkeypatch):
+    from app import llm_utils
+    from app.tools import wwyd as tool_mod
+
+    owner = await _profile("Eugene")
+    await _connect(owner)
+
+    async def fake_busy(pid):
+        return "Busy times …: none."
+
+    async def chat(messages, **kw):
+        return {"message": {"content": "NONE"}}
+
+    monkeypatch.setattr(tool_mod, "calendar_free_busy", fake_busy)
+    monkeypatch.setattr(llm_utils, "chat", chat)
+    fake.predict_replies = [
+        {"type": "answer", "answer": "sounds great, I'll look at the weather", "confidence": 0.7,
+         "depends_on": "Goes to the lake only in warm weather.", "disclosure": "d"}]
+    r = await tool_mod.how_would_answer("lake?", ctx=_Ctx(owner, frozenset({"wwyd", "wwyd_ask"})))
+    assert [c[0] for c in fake.calls].count("predict") == 1
+    assert r.text == "sounds great, I'll look at the weather"
+    assert r.data["depends_on"] == "Goes to the lake only in warm weather."
+
+    # A low-confidence escalation still sends the asker to the person.
     fake.predict_replies = [{"type": "escalate", "escalate": "low_confidence", "reason": "x"}]
     r = await tool_mod.how_would_answer("visit?", ctx=_Ctx(owner, frozenset({"wwyd", "wwyd_ask"})))
     assert "ask Eugene directly" in r.text
@@ -456,10 +470,11 @@ async def test_capture_ingests_owner_words_with_mapped_audience(fake, fake_class
     await wwyd_capture.wait_idle()
     name, args = fake.calls[-1]
     assert name == "ingest_raw"
-    msg, note = args["records"]
-    assert msg["type"] == "message" and msg["from_owner"] is True and msg["audience"] == "family"
+    msg, note = args["episodes"]
+    assert msg == {"when": msg["when"], "situation": wwyd_capture.MESSAGE_SITUATION,
+                   "said": "I'll be late, sorry", "audience": "family"}
     assert "Anna" not in json.dumps(args)
-    assert note == {"type": "note", "text": "I never take calls before 10", "ts": note["ts"]}
+    assert note == {"when": note["when"], "said": "I never take calls before 10"}
 
 
 async def test_capture_is_owner_only(fake, fake_classifier):

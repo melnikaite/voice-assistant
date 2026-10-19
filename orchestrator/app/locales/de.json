@@ -248,7 +248,6 @@
     "tool.service_not_connected": "Dafür braucht es wwyd, und das ist für dieses Profil nicht verbunden — verbinde es in den Einstellungen.",
     "wwyd.unknown_person": "Ich weiß nicht, wie {name} antworten würde — wwyd ist dort nicht verbunden.",
     "wwyd.which_person": "Wessen Antwort soll ich vorhersagen?",
-    "wwyd.needs_unmet": "Ohne Folgendes kann ich nicht sagen, wie {name} antworten würde: {needs}.",
     "wwyd.ask_directly": "Das kann ich nicht sicher vorhersagen — frag {name} besser direkt.",
     "wwyd.unavailable": "wwyd ist gerade nicht erreichbar.",
     "wwyd.remembered": "In wwyd gespeichert: {text}",

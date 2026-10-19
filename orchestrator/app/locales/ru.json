@@ -248,7 +248,6 @@
     "tool.service_not_connected": "Для этого нужен wwyd, а он не подключён к этому профилю — подключи его в настройках.",
     "wwyd.unknown_person": "Не знаю, как ответил бы {name}: у него не подключён wwyd.",
     "wwyd.which_person": "Чей ответ предсказать?",
-    "wwyd.needs_unmet": "Не могу сказать, как ответил бы {name}, без этого: {needs}.",
     "wwyd.ask_directly": "Тут уверенно не предскажу — лучше спросить {name} напрямую.",
     "wwyd.unavailable": "wwyd сейчас недоступен.",
     "wwyd.remembered": "Сохранил в wwyd: {text}",
