@@ -339,36 +339,38 @@ async def test_owner_names_audience_and_sees_private(fake):
 
 
 async def test_depends_on_is_settled_from_calendar_conclusion(fake, monkeypatch):
+    import datetime as dt
     from app import llm_utils
     from app.tools import wwyd as tool_mod
 
     owner = await _profile("Eugene")
     await _connect(owner)
-    busy = "Busy times …: Tue 2026-10-20 10:00-11:00"
+    tomorrow = dt.date.today() + dt.timedelta(days=1)
+    spans = [(dt.datetime.combine(tomorrow, dt.time(13, 0)), dt.datetime.combine(tomorrow, dt.time(14, 0)))]
     seen: list[str] = []
 
     async def fake_busy(pid):
-        return busy
+        return spans
 
     async def chat(messages, **kw):
         seen.append(messages[1]["content"])
-        return {"message": {"content": "free on Tuesday from 11:00"}}
+        return {"message": {"content": f"When: {tomorrow} 14:00"}}
 
-    monkeypatch.setattr(tool_mod, "calendar_free_busy", fake_busy)
+    monkeypatch.setattr(tool_mod, "calendar_busy", fake_busy)
     monkeypatch.setattr(llm_utils, "chat", chat)
     fake.predict_replies = [
         {"type": "answer", "answer": "let me check and get back to you", "confidence": 0.7,
-         "depends_on": "Agrees if Tuesday around 14:00 is free.", "disclosure": "d"},
-        {"type": "answer", "answer": "Tuesday 14:00 works.", "confidence": 0.8,
+         "depends_on": "Agrees if tomorrow around 14:00 is free.", "disclosure": "d"},
+        {"type": "answer", "answer": "Tomorrow 14:00 works.", "confidence": 0.8,
          "depends_on": None, "disclosure": "d"},
     ]
-    r = await tool_mod.how_would_answer("meet Tuesday?", ctx=_Ctx(owner, frozenset({"wwyd", "wwyd_ask"})))
-    assert "Agrees if Tuesday" in seen[0] and busy in seen[0]
+    r = await tool_mod.how_would_answer("meet tomorrow?", ctx=_Ctx(owner, frozenset({"wwyd", "wwyd_ask"})))
+    # The model only names the time; the schedule never reaches it or wwyd.
+    assert "Agrees if tomorrow" in seen[0] and "13:00" not in seen[0]
     first, second = (c[1] for c in fake.calls if c[0] == "predict")
     assert "context" not in first
-    # Only the conclusion goes to wwyd, never the schedule.
-    assert second == {**first, "context": "free on Tuesday from 11:00"}
-    assert r.text == "Tuesday 14:00 works."
+    assert second == {**first, "context": f"tomorrow ({tomorrow:%a %Y-%m-%d}) 14:00-14:30 is free"}
+    assert r.text == "Tomorrow 14:00 works."
 
 
 async def test_depends_on_without_conclusion_keeps_first_answer(fake, monkeypatch):
@@ -379,12 +381,12 @@ async def test_depends_on_without_conclusion_keeps_first_answer(fake, monkeypatc
     await _connect(owner)
 
     async def fake_busy(pid):
-        return "Busy times …: none."
+        return []
 
     async def chat(messages, **kw):
-        return {"message": {"content": "NONE"}}
+        return {"message": {"content": "When: NONE"}}
 
-    monkeypatch.setattr(tool_mod, "calendar_free_busy", fake_busy)
+    monkeypatch.setattr(tool_mod, "calendar_busy", fake_busy)
     monkeypatch.setattr(llm_utils, "chat", chat)
     fake.predict_replies = [
         {"type": "answer", "answer": "sounds great, I'll look at the weather", "confidence": 0.7,
@@ -400,15 +402,35 @@ async def test_depends_on_without_conclusion_keeps_first_answer(fake, monkeypatc
     assert "ask Eugene directly" in r.text
 
 
-def test_free_busy_has_times_only():
+def test_busy_spans_have_times_only_and_merge():
     import datetime as dt
-    from app.tools.wwyd import _format_busy
+    from app.tools.wwyd import _busy_spans
 
-    out = _format_busy(
-        "2026-10-20T10:00:00|2026-10-20T11:00:00\n2026-10-20T10:30:00|2026-10-20T12:00:00\njunk\n",
-        dt.datetime(2026, 10, 19, 9, 0),
-    )
-    assert out.endswith("Tue 2026-10-20 10:00-12:00")
+    out = _busy_spans(
+        "2026-10-20T10:00:00|2026-10-20T11:00:00\n2026-10-20T10:30:00|2026-10-20T12:00:00\njunk\n")
+    assert out == [(dt.datetime(2026, 10, 20, 10), dt.datetime(2026, 10, 20, 12))]
+
+
+def test_conclusion_answers_the_window_only():
+    import datetime as dt
+    from app.tools.wwyd import _conclude
+
+    now = dt.datetime(2026, 10, 19, 9, 0)
+    d = lambda h, m=0: dt.datetime(2026, 10, 20, h, m)
+    spans = [(d(14), d(16)), (d(18), d(20))]
+    assert _conclude(spans, d(15), d(15, 30), now) == "tomorrow (Tue 2026-10-20) 15:00-15:30 is taken"
+    assert _conclude(spans, d(17), d(17, 30), now) == "tomorrow (Tue 2026-10-20) 17:00-17:30 is free"
+    assert _conclude(spans, d(17), d(22), now) == (
+        "Within tomorrow (Tue 2026-10-20) 17:00-22:00 only 17:00-18:00, 20:00-22:00 is free")
+
+
+def test_match_name_across_scripts_and_cases():
+    from app.tools.wwyd import _match_name
+
+    profiles = [(1, "Anna"), (2, "Маша"), (3, "Eugene")]
+    assert _match_name("Анне", profiles) == (1, "Anna")
+    assert _match_name("Маше", profiles) == (2, "Маша")
+    assert _match_name("Tom", profiles) is None
 
 
 async def test_remember_adds_approved_claim(fake):

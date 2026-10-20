@@ -44,15 +44,17 @@ _FIRST_PERSON = re.compile(
 CLASSIFY_PROMPT = (
     "You read what one person said to their voice assistant and pick out the "
     "person's OWN words that show how they talk or behave:\n"
-    "  * message: words they dictate to someone else (\"tell Anna I'll be late, "
-    "sorry\" -> text \"I'll be late, sorry\", to \"Anna\"), or a reply to a "
-    "voicemail;\n"
+    "  * message: words they dictate to someone else (\"tell Anna that on Friday "
+    "I'll be late, sorry\" -> text \"on Friday I'll be late, sorry\", to \"Anna\"), "
+    "or a reply to a voicemail;\n"
     "  * note: a statement about themselves — habits, rules, preferences, "
-    "boundaries (\"I never take calls before 10\").\n"
+    "boundaries (\"on weekends I never take calls before 10\").\n"
     "Requests and questions to the assistant itself (weather, timers, music, "
     "\"what is…\", \"remind me…\", \"add milk\", \"play my playlist\") are NOT picked, "
-    "even when they say \"my\".  Keep the "
-    "person's wording and language; drop names, phone numbers, emails and "
+    "even when they say \"my\".  In a picked item keep the "
+    "person's wording and language, with every word saying when, how often or under "
+    "which condition (\"on weekends\", \"tomorrow\"); cut only the instruction to the "
+    "assistant (\"tell Anna that\"), and drop names, phone numbers, emails and "
     "addresses from the text.\n"
     "Answer with JSON only: {\"items\": [{\"type\": \"message\"|\"note\", "
     "\"text\": \"…\", \"to\": \"<recipient name or empty>\"}]}; "
@@ -121,6 +123,8 @@ async def classify(texts: list[str]) -> list[dict]:
 
 
 async def _episodes(profile_id: int, items: list[dict], ts: str) -> list[dict]:
+    from .tools.wwyd import _match_name
+
     conn = await get_wwyd_connection(profile_id)
     amap = (conn or {}).get("audience_map") or {}
     profiles = await list_profiles_by_name()
@@ -130,10 +134,9 @@ async def _episodes(profile_id: int, items: list[dict], ts: str) -> list[dict]:
         if it["type"] == "note":
             episodes.append({"when": ts, "said": it["text"]})
             continue
-        to = it["to"].lower()
         # Recipient name → household profile → owner's audience; names never leave.
-        pid = next((p for p, n in profiles if to and (n.lower() == to or n.lower()[:3] == to[:3])), None)
-        aud = amap.get(f"profile:{pid}") if pid is not None else None
+        hit = _match_name(it["to"], profiles)
+        aud = amap.get(f"profile:{hit[0]}") if hit else None
         # said + audience without situation is an outgoing message; without the
         # audience wwyd would read it as a statement about the owner.
         episodes.append({"when": ts, "said": it["text"], "audience": aud or "default"})

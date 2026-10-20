@@ -738,11 +738,13 @@ only connected profile.  The owner asking about themself names the audience and 
 `include_private`; anyone else is answered as their mapped audience (the model's `audience`
 argument is ignored) and always hears wwyd's `disclosure` first.  wwyd's answer is always
 sendable; when it comes with `depends_on` (plain words: what the real answer depends on),
-the target's own paired Mac is asked for busy times — a fixed read-only AppleScript, start/end
-for 7 days, never titles, attendees or places — and the local LLM turns them into a one-line
-answer to the condition itself ("14:55-15:25 tomorrow is free") or NONE.  Only that conclusion goes back to
-`predict` as `context`; without a Mac, or when the calendar does not settle it, the first
-answer stands.  Whether to auto-reply or
+the local LLM names the time the condition is about (or NONE: weather, other people), the
+target's own paired Mac is asked for busy times — a fixed read-only AppleScript, start/end for
+7 days, never titles, attendees or places — and code checks that window against them: "tomorrow
+(Tue 2026-10-20) 15:00-15:30 is taken".  The 8B model names the time reliably but misjudges
+overlaps, so it never sees the schedule.  Only that sentence goes back to `predict` as
+`context`; without a Mac, or when the condition is not about free time, the first answer
+stands.  Whether to auto-reply or
 draft stays with the assistant; this tool only speaks the prediction.
 
 **Write path, explicit — `wwyd_remember`** (`low_write`): one third-person statement with

@@ -11,13 +11,15 @@ turn's ``AgentContext.services`` covers them (see ``wwyd_services``):
     asking about themself names it.
 
 ``predict`` answers are sendable as is; when one comes with ``depends_on``,
-the target's own Mac calendar (times only) is turned into a one-line
-conclusion by the local LLM, and only that goes back as ``context``.
+the local LLM names the time it is about, the target's own Mac calendar
+(times only) is checked in code, and only the one-line conclusion goes
+back as ``context``.
 """
 from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 
 from .. import wwyd
 from ..i18n import t
@@ -28,7 +30,6 @@ log = logging.getLogger(__name__)
 
 GUEST_KEY = "guest"
 FREEBUSY_DAYS = 7
-_FACT_MAX = 2000
 DEFAULT_CATEGORY = "communication/style"
 KINDS = ["trait", "preference", "habit", "decision_rule", "style", "boundary"]
 
@@ -45,6 +46,15 @@ async def wwyd_services(profile_id: int | None, mixed: bool) -> frozenset[str]:
     return frozenset(out)
 
 
+_LATIN = str.maketrans({
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
+    "з": "z", "и": "i", "й": "i", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "ts",
+    "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu",
+    "я": "ya",
+})
+
+
 def _match_name(spoken: str, profiles: list[tuple[int, str]]) -> tuple[int, str] | None:
     needle = spoken.strip().lower()
     if not needle:
@@ -52,9 +62,11 @@ def _match_name(spoken: str, profiles: list[tuple[int, str]]) -> tuple[int, str]
     for pid, name in profiles:
         if name.lower() == needle:
             return pid, name
-    # Inflected forms ("Маше" → "Маша"): shared 3-char stem.
+    # Inflected forms ("Маше" → "Маша") and the other script ("Анне" →
+    # "Anna"): shared 3-char stem after transliteration.
+    stem = needle.translate(_LATIN)[:3]
     hits = [(pid, name) for pid, name in profiles
-            if len(needle) >= 3 and name.lower()[:3] == needle[:3]]
+            if len(needle) >= 3 and name.lower().translate(_LATIN)[:3] == stem]
     return min(hits, key=lambda h: len(h[1])) if hits else None
 
 
@@ -107,7 +119,7 @@ return out
 """
 
 
-def _format_busy(stdout: str, now: dt.datetime) -> str:
+def _busy_spans(stdout: str) -> list[tuple[dt.datetime, dt.datetime]]:
     spans: list[tuple[dt.datetime, dt.datetime]] = []
     for line in stdout.splitlines():
         try:
@@ -116,22 +128,16 @@ def _format_busy(stdout: str, now: dt.datetime) -> str:
         except ValueError:
             continue
     spans.sort()
-    merged: list[list[dt.datetime]] = []
+    merged: list[tuple[dt.datetime, dt.datetime]] = []
     for a, b in spans:
         if merged and a <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], b)
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
         else:
-            merged.append([a, b])
-    end = now + dt.timedelta(days=FREEBUSY_DAYS)
-    head = f"Busy times from {now:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} (local time); everything else is free:"
-    if not merged:
-        return f"{head} none."
-    body = "; ".join(f"{a:%a %Y-%m-%d %H:%M}-{b:%H:%M}" if a.date() == b.date()
-                     else f"{a:%a %Y-%m-%d %H:%M}-{b:%a %Y-%m-%d %H:%M}" for a, b in merged)
-    return f"{head} {body}"[:_FACT_MAX]
+            merged.append((a, b))
+    return merged
 
 
-async def calendar_free_busy(profile_id: int) -> str | None:
+async def calendar_busy(profile_id: int) -> list[tuple[dt.datetime, dt.datetime]] | None:
     """Busy spans of the profile's own Mac calendar — start/end only, never
     titles, attendees or places.  None when no Mac is reachable."""
     from .. import desktop_client
@@ -150,17 +156,48 @@ async def calendar_free_busy(profile_id: int) -> str | None:
         return None
     if res.get("exit") not in (0, None):
         return None
-    return _format_busy(res.get("stdout") or "", dt.datetime.now().replace(second=0, microsecond=0))
+    return _busy_spans(res.get("stdout") or "")
 
 
-CONTEXT_PROMPT = (
-    "A person's real reply to a situation depends on something their persona cannot "
-    "know.  You get the situation, what the reply depends on, and the person's busy "
-    "times.  If the busy times settle it, answer with one short sentence that answers "
-    "the condition itself (for example \"14:55-15:25 tomorrow is free\" or \"Tuesday "
-    "15:00 is taken\"), in the language of the dependency, never listing the schedule "
-    "or a wider free window.  If they do not, answer NONE."
+# The 8B model reliably names the time but not whether a schedule covers it,
+# so it only extracts the time and the overlap is checked in code.
+WHEN_PROMPT = (
+    "Find the time a condition is about.  You get today's date with the next days, a "
+    "situation, and the condition a person's reply depends on.  If the condition depends "
+    "on the person being free at some time, reply with one line:\n"
+    "When: YYYY-MM-DD HH:MM  (a moment)  or  When: YYYY-MM-DD HH:MM-HH:MM  (a span; "
+    "\"evening\" is 18:00-22:00, \"morning\" 08:00-12:00, \"afternoon\" 12:00-18:00)\n"
+    "using the dates listed.  If it depends on anything else (weather, other people, "
+    "money) or names no day, reply: When: NONE"
 )
+_WHEN = re.compile(r"When:\s*(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})(?:\s*-\s*(\d{1,2}:\d{2}))?\s*$")
+_MOMENT = dt.timedelta(minutes=30)
+
+
+def _day_label(day: dt.date, today: dt.date) -> str:
+    rel = {0: "today ", 1: "tomorrow "}.get((day - today).days, "")
+    return f"{rel}({day:%a %Y-%m-%d})" if rel else f"{day:%a %Y-%m-%d}"
+
+
+def _conclude(spans: list[tuple[dt.datetime, dt.datetime]], start: dt.datetime,
+              end: dt.datetime, now: dt.datetime) -> str:
+    """Whether [start, end) is free, as a sentence about that window only."""
+    free, cur = [], start
+    for a, b in spans:
+        if b <= cur or a >= end:
+            continue
+        if a > cur:
+            free.append((cur, a))
+        cur = max(cur, b)
+    if cur < end:
+        free.append((cur, end))
+    window = f"{_day_label(start.date(), now.date())} {start:%H:%M}-{end:%H:%M}"
+    if free == [(start, end)]:
+        return f"{window} is free"
+    if not free:
+        return f"{window} is taken"
+    parts = ", ".join(f"{a:%H:%M}-{b:%H:%M}" for a, b in free)
+    return f"Within {window} only {parts} is free"
 
 
 async def _calendar_context(profile_id: int, situation: str, depends_on: str) -> str | None:
@@ -168,23 +205,35 @@ async def _calendar_context(profile_id: int, situation: str, depends_on: str) ->
     the schedule itself never leaves this machine."""
     from ..llm_utils import chat, extract_text
 
-    busy = await calendar_free_busy(profile_id)
-    if not busy:
+    spans = await calendar_busy(profile_id)
+    if spans is None:
         return None
+    now = dt.datetime.now().replace(second=0, microsecond=0)
+    days = "\n".join(_day_label(now.date() + dt.timedelta(days=n), now.date())
+                     for n in range(FREEBUSY_DAYS + 1))
     try:
         choice = await chat(
-            [{"role": "system", "content": CONTEXT_PROMPT},
-             {"role": "user", "content": f"Situation: {situation[:2000]}\n"
-                                         f"Depends on: {depends_on}\nBusy times: {busy}"}],
-            temperature=0.0, max_tokens=80, tool_name="<wwyd_context>",
+            [{"role": "system", "content": WHEN_PROMPT},
+             {"role": "user", "content": f"Days:\n{days}\nSituation: {situation[:2000]}\n"
+                                         f"Depends on: {depends_on}"}],
+            temperature=0.0, max_tokens=40, tool_name="<wwyd_context>",
         )
     except Exception as exc:  # the first answer stands
         log.info("wwyd: context step failed: %s", exc.__class__.__name__)
         return None
-    text = extract_text(choice["message"]).strip().strip('"')
-    if not text or text.upper().startswith("NONE"):
+    m = _WHEN.search(extract_text(choice["message"]).strip())
+    if not m:
         return None
-    return text[:_FACT_MAX]
+    try:
+        start = dt.datetime.fromisoformat(f"{m[1]}T{int(m[2][:-3]):02d}:{m[2][-2:]}")
+        end = (dt.datetime.fromisoformat(f"{m[1]}T{int(m[3][:-3]):02d}:{m[3][-2:]}")
+               if m[3] else start + _MOMENT)
+    except ValueError:
+        return None
+    # Outside what was read from the calendar the answer is unknown.
+    if end <= start or start.date() < now.date() or end > now + dt.timedelta(days=FREEBUSY_DAYS):
+        return None
+    return _conclude(spans, start, end, now)
 
 
 async def _resolve_target(person: str | None, speaker_id: int | None) -> tuple[int, str] | str:
