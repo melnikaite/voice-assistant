@@ -36,6 +36,8 @@ class FakeWwyd:
         self.access = SECRET_ACCESS
         self.reject_access_once = False
         self.token_forms: list[dict] = []
+        self.timezone = "UTC"
+        self.job_statuses: list[dict] = []
 
     def _tool(self, name: str, args: dict) -> dict:
         self.calls.append((name, args))
@@ -58,6 +60,13 @@ class FakeWwyd:
             return {"created": ["clm_1"], "absorbed": [], "dropped": []}
         if name == "ingest_raw":
             return {"job_id": "job_1", "accepted": len(args["episodes"])}
+        if name == "job_status":
+            return self.job_statuses.pop(0) if self.job_statuses else {"status": "done"}
+        if name == "get_settings":
+            return {"timezone": self.timezone}
+        if name == "update_settings":
+            self.timezone = args["timezone"]
+            return {}
         raise AssertionError(name)
 
     def handler(self, req: httpx.Request) -> httpx.Response:
@@ -117,11 +126,24 @@ class FakeWwyd:
         return httpx.Response(404)
 
 
+def _ingested(f: FakeWwyd) -> list[dict]:
+    return [a for n, a in f.calls if n == "ingest_raw"]
+
+
 @pytest.fixture
 def fake(monkeypatch):
+    from app import llm_utils
+
+    async def no_time(messages, **kw):
+        return {"message": {"content": "When: NONE"}}
+
     f = FakeWwyd()
     monkeypatch.setattr(wwyd, "_TRANSPORT", httpx.MockTransport(f.handler))
     monkeypatch.setattr(wwyd, "_categories_cache", {})
+    monkeypatch.setattr(wwyd, "local_timezone", lambda: "Europe/Berlin")
+    monkeypatch.setattr(llm_utils, "chat", no_time)
+    monkeypatch.setattr(wwyd_capture, "_POLL_S", 0)
+    monkeypatch.setattr(wwyd_capture, "_RESEND_PAUSES_S", (0, 0, 0))
     return f
 
 
@@ -183,6 +205,8 @@ async def test_oauth_connect_callback_and_disconnect(fake, caplog):
 
         conn = await get_wwyd_connection(pid)
         assert conn["access_token"].startswith("acc-SECRET")
+        # A persona on the default UTC gets this machine's zone.
+        assert ("update_settings", {"timezone": "Europe/Berlin"}) in fake.calls
 
         assert c.delete("/api/wwyd").json() == {"ok": True, "removed": True, "revoked": True}
         assert fake.revoked == [conn["refresh_token"]]
@@ -200,12 +224,14 @@ async def test_api_key_connect_requires_owner_scope(fake, monkeypatch):
 
     pid = await _profile("Ann")
     fake.access = "wwyd_abcdefgh_" + "k" * 24
+    fake.timezone = "Asia/Tokyo"  # the owner's own choice stays
     with TestClient(app) as c:
         c.cookies.set("va_session", await create_session(pid))
         r = c.post("/api/wwyd/api-key", json={"url": BASE, "key": fake.access})
         assert r.status_code == 200
         conn = await get_wwyd_connection(pid)
         assert conn["auth_kind"] == "api_key" and conn["refresh_token"] is None
+        assert fake.timezone == "Asia/Tokyo"
         bad = c.post("/api/wwyd/api-key", json={"url": BASE, "key": "wwyd_wrongkey_" + "x" * 24})
         assert bad.status_code == 400
         # Disconnect revokes the key itself, without client authentication.
@@ -373,6 +399,33 @@ async def test_depends_on_is_settled_from_calendar_conclusion(fake, monkeypatch)
     assert r.text == "Tomorrow 14:00 works."
 
 
+async def test_calendar_is_checked_when_depends_on_is_null(fake, monkeypatch):
+    import datetime as dt
+    from app import llm_utils
+    from app.tools import wwyd as tool_mod
+
+    owner = await _profile("Eugene")
+    await _connect(owner)
+    tomorrow = dt.date.today() + dt.timedelta(days=1)
+
+    async def fake_busy(pid):
+        return [(dt.datetime.combine(tomorrow, dt.time(15, 0)), dt.datetime.combine(tomorrow, dt.time(16, 0)))]
+
+    async def chat(messages, **kw):
+        return {"message": {"content": f"When: {tomorrow} 15:00"}}
+
+    monkeypatch.setattr(tool_mod, "calendar_busy", fake_busy)
+    monkeypatch.setattr(llm_utils, "chat", chat)
+    fake.predict_replies = [
+        {"type": "answer", "answer": "sure, 15:00 works", "depends_on": None, "disclosure": "d"},
+        {"type": "answer", "answer": "can't at 15, I'm busy", "depends_on": None, "disclosure": "d"},
+    ]
+    r = await tool_mod.how_would_answer("call tomorrow at 15?", ctx=_Ctx(owner, frozenset({"wwyd", "wwyd_ask"})))
+    second = [c[1] for c in fake.calls if c[0] == "predict"][1]
+    assert second["context"] == f"tomorrow ({tomorrow:%a %Y-%m-%d}) 15:00-15:30 is taken"
+    assert r.text == "can't at 15, I'm busy"
+
+
 async def test_depends_on_without_conclusion_keeps_first_answer(fake, monkeypatch):
     from app import llm_utils
     from app.tools import wwyd as tool_mod
@@ -490,8 +543,7 @@ async def test_capture_ingests_owner_words_with_mapped_audience(fake, fake_class
     await set_wwyd_audience_map(owner, {f"profile:{anna}": "family"})
     wwyd_capture.observe(owner, False, "tell Anna I'll be late, sorry")
     await wwyd_capture.wait_idle()
-    name, args = fake.calls[-1]
-    assert name == "ingest_raw"
+    args = _ingested(fake)[-1]
     msg, note = args["episodes"]
     assert msg == {"when": msg["when"], "said": "I'll be late, sorry", "audience": "family"}
     assert "Anna" not in json.dumps(args)
@@ -503,8 +555,20 @@ async def test_capture_unmapped_recipient_stays_an_outgoing_message(fake, fake_c
     await _connect(owner)
     wwyd_capture.observe(owner, False, "tell Anna I'll be late, sorry")
     await wwyd_capture.wait_idle()
-    msg, _ = fake.calls[-1][1]["episodes"]
+    msg, _ = _ingested(fake)[-1]["episodes"]
     assert msg["audience"] == "default" and "situation" not in msg
+
+
+async def test_capture_resends_what_a_busy_llm_left(fake, fake_classifier):
+    owner = await _profile("Eugene")
+    await _connect(owner)
+    fake.job_statuses = [{"status": "running"},
+                         {"status": "partial", "error_code": "llm_unavailable", "remaining_records": [1]},
+                         {"status": "done"}]
+    wwyd_capture.observe(owner, False, "tell Anna I'll be late, sorry")
+    await wwyd_capture.wait_idle()
+    first, second = _ingested(fake)
+    assert second["episodes"] == [first["episodes"][1]]
 
 
 async def test_capture_is_owner_only(fake, fake_classifier):

@@ -124,6 +124,7 @@ async def api_wwyd_callback(
         token_endpoint=pending["token_endpoint"],
         revocation_endpoint=pending["revocation_endpoint"], **tokens,
     )
+    await wwyd.sync_timezone(user["profile_id"])
     log.info("wwyd: profile %d connected via OAuth", user["profile_id"])
     return RedirectResponse("/?wwyd=connected", status_code=303)
 
@@ -144,6 +145,7 @@ async def api_wwyd_api_key(body: ApiKeyBody, user: dict = Depends(_current_user)
         user["profile_id"], base_url=base, resource=resource, auth_kind="api_key",
         access_token=body.key.strip(),
     )
+    await wwyd.sync_timezone(user["profile_id"])
     log.info("wwyd: profile %d connected via API key", user["profile_id"])
     return JSONResponse({"ok": True})
 

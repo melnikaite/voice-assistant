@@ -10,8 +10,9 @@ turn's ``AgentContext.services`` covers them (see ``wwyd_services``):
     mapped through the owner's ``audience_map`` (Settings), the owner
     asking about themself names it.
 
-``predict`` answers are sendable as is; when one comes with ``depends_on``,
-the local LLM names the time it is about, the target's own Mac calendar
+wwyd models the person, not the world: ``depends_on`` names only the
+owner's own conditions, never free time.  So for every answer the local
+LLM names the time it is about, if any, the target's own Mac calendar
 (times only) is checked in code, and only the one-line conclusion goes
 back as ``context``.
 """
@@ -162,13 +163,15 @@ async def calendar_busy(profile_id: int) -> list[tuple[dt.datetime, dt.datetime]
 # The 8B model reliably names the time but not whether a schedule covers it,
 # so it only extracts the time and the overlap is checked in code.
 WHEN_PROMPT = (
-    "Find the time a condition is about.  You get today's date with the next days, a "
-    "situation, and the condition a person's reply depends on.  If the condition depends "
-    "on the person being free at some time, reply with one line:\n"
+    "Find the time a reply is about.  You get today's date with the next days, a "
+    "situation, and maybe a condition the person's reply depends on.  If the situation "
+    "asks for the person's time (a meeting, call, visit or plan at a day and hour), the "
+    "reply depends on them being free then, whatever else the condition says; reply with "
+    "one line:\n"
     "When: YYYY-MM-DD HH:MM  (a moment)  or  When: YYYY-MM-DD HH:MM-HH:MM  (a span; "
     "\"evening\" is 18:00-22:00, \"morning\" 08:00-12:00, \"afternoon\" 12:00-18:00)\n"
-    "using the dates listed.  If it depends on anything else (weather, other people, "
-    "money) or names no day, reply: When: NONE"
+    "using the dates listed.  If it names no time of day, is about the past, or does not "
+    "ask for the person's time, reply: When: NONE"
 )
 _WHEN = re.compile(r"When:\s*(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})(?:\s*-\s*(\d{1,2}:\d{2}))?\s*$")
 _MOMENT = dt.timedelta(minutes=30)
@@ -201,13 +204,10 @@ def _conclude(spans: list[tuple[dt.datetime, dt.datetime]], start: dt.datetime,
 
 
 async def _calendar_context(profile_id: int, situation: str, depends_on: str) -> str | None:
-    """A one-line conclusion from the owner's calendar for ``depends_on``;
-    the schedule itself never leaves this machine."""
+    """A one-line conclusion from the owner's calendar for the time the reply
+    is about; the schedule itself never leaves this machine."""
     from ..llm_utils import chat, extract_text
 
-    spans = await calendar_busy(profile_id)
-    if spans is None:
-        return None
     now = dt.datetime.now().replace(second=0, microsecond=0)
     days = "\n".join(_day_label(now.date() + dt.timedelta(days=n), now.date())
                      for n in range(FREEBUSY_DAYS + 1))
@@ -215,7 +215,7 @@ async def _calendar_context(profile_id: int, situation: str, depends_on: str) ->
         choice = await chat(
             [{"role": "system", "content": WHEN_PROMPT},
              {"role": "user", "content": f"Days:\n{days}\nSituation: {situation[:2000]}\n"
-                                         f"Depends on: {depends_on}"}],
+                                         f"Depends on: {depends_on or '-'}"}],
             temperature=0.0, max_tokens=40, tool_name="<wwyd_context>",
         )
     except Exception as exc:  # the first answer stands
@@ -233,7 +233,8 @@ async def _calendar_context(profile_id: int, situation: str, depends_on: str) ->
     # Outside what was read from the calendar the answer is unknown.
     if end <= start or start.date() < now.date() or end > now + dt.timedelta(days=FREEBUSY_DAYS):
         return None
-    return _conclude(spans, start, end, now)
+    spans = await calendar_busy(profile_id)
+    return None if spans is None else _conclude(spans, start, end, now)
 
 
 async def _resolve_target(person: str | None, speaker_id: int | None) -> tuple[int, str] | str:
@@ -328,12 +329,11 @@ async def how_would_answer(
     }
     try:
         out = await wwyd.call_tool(target_id, "predict", args)
-        # The answer is sendable as is; the calendar can only make it concrete.
-        depends_on = str(out.get("depends_on") or "").strip() if out.get("type") == "answer" else ""
-        if depends_on:
-            await cx.progress("wwyd", "calendar")
-            context = await _calendar_context(target_id, situation, depends_on)
+        # A null depends_on does not mean the owner is free; the calendar decides that.
+        if out.get("type") == "answer":
+            context = await _calendar_context(target_id, situation, str(out.get("depends_on") or "").strip())
             if context:
+                await cx.progress("wwyd", "calendar")
                 out = await wwyd.call_tool(target_id, "predict", {**args, "context": context})
     except wwyd.WwydError as exc:
         log.info("wwyd: predict failed: %s", exc.code)

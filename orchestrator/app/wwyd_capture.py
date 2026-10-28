@@ -30,6 +30,10 @@ log = logging.getLogger(__name__)
 # Turns whose wwyd effect is explicit already.
 _SKIP_TOOLS = {"wwyd_remember", "how_would_answer"}
 _MAX_QUEUE = 20
+# wwyd never retries a job; one stopped by a busy LLM is resent after these pauses.
+_RESEND_PAUSES_S = (30, 60, 120)
+_POLL_S = 5.0
+_JOB_WAIT_S = 1800.0
 
 # Cheap gate before spending an LLM call: the owner speaks in the first
 # person, or tells someone something.
@@ -149,6 +153,33 @@ async def list_profiles_by_name() -> list[tuple[int, str]]:
     return [(int(r[0]), r[1]) for r in await get_all_speaker_profiles()]
 
 
+async def _wait_job(profile_id: int, job_id: str) -> dict:
+    deadline = asyncio.get_running_loop().time() + _JOB_WAIT_S
+    while True:
+        status = await wwyd.call_tool(profile_id, "job_status", {"job_id": job_id})
+        if status.get("status") not in ("queued", "running") or asyncio.get_running_loop().time() > deadline:
+            return status
+        await asyncio.sleep(_POLL_S)
+
+
+async def _ingest(profile_id: int, episodes: list[dict]) -> None:
+    """Ingest and wait for the job; after ``llm_unavailable`` only the
+    episodes it did not process are resent."""
+    for pause in (*_RESEND_PAUSES_S, None):
+        out = await wwyd.call_tool(profile_id, "ingest_raw", {"episodes": episodes})
+        if not out.get("job_id"):
+            return
+        status = await _wait_job(profile_id, out["job_id"])
+        if status.get("status") != "partial" or status.get("error_code") != "llm_unavailable":
+            break
+        episodes = [episodes[i] for i in status.get("remaining_records") or [] if i < len(episodes)]
+        if not episodes or pause is None:
+            break
+        await asyncio.sleep(pause)
+    log.info("wwyd: ingest job for profile %d ended %s %s", profile_id,
+             status.get("status"), status.get("error_code") or "")
+
+
 async def _drain(profile_id: int) -> None:
     while _queues.get(profile_id):
         batch, _queues[profile_id] = _queues[profile_id], []
@@ -159,8 +190,8 @@ async def _drain(profile_id: int) -> None:
             if not items:
                 continue
             episodes = await _episodes(profile_id, items, batch[-1].ts)
-            await wwyd.call_tool(profile_id, "ingest_raw", {"episodes": episodes})
-            log.info("wwyd: ingested %d episode(s) for profile %d", len(episodes), profile_id)
+            log.info("wwyd: ingesting %d episode(s) for profile %d", len(episodes), profile_id)
+            await _ingest(profile_id, episodes)
         except wwyd.WwydError as exc:
             log.warning("wwyd: ingest failed for profile %d: %s", profile_id, exc.code)
         except Exception as exc:  # the batch is dropped; content is never logged

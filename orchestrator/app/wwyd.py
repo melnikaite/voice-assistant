@@ -18,6 +18,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import secrets
 import time
 from urllib.parse import urlencode, urlsplit
@@ -372,6 +373,28 @@ async def list_category_paths(profile_id: int) -> list[str]:
             stack.extend(node.get("children") or [])
     _categories_cache[profile_id] = (time.monotonic(), paths)
     return paths
+
+
+def local_timezone() -> str | None:
+    """IANA name of this machine's zone, the one its calendar is in."""
+    try:
+        name = os.readlink("/etc/localtime").partition("zoneinfo/")[2]
+    except OSError:
+        return None
+    return name or None
+
+
+async def sync_timezone(profile_id: int) -> None:
+    """A persona still on wwyd's default UTC gets this machine's zone, so
+    "tomorrow" in ``predict`` is the owner's tomorrow; an owner's own choice stays."""
+    tz = local_timezone()
+    if not tz or tz == "UTC":
+        return
+    try:
+        if ((await call_tool(profile_id, "get_settings", {})).get("timezone") or "UTC") == "UTC":
+            await call_tool(profile_id, "update_settings", {"timezone": tz})
+    except WwydError as exc:
+        log.info("wwyd: timezone not set for profile %d: %s", profile_id, exc.code)
 
 
 async def is_connected(profile_id: int | None) -> bool:
